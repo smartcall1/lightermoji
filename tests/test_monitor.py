@@ -60,12 +60,12 @@ def test_fmt_price():
 
 def test_format_message_has_symbol():
     positions = parse_positions(SAMPLE_ACCOUNT)
-    msg = format_position_message(SAMPLE_ACCOUNT, positions)
+    msg = format_position_message(SAMPLE_ACCOUNT, positions, {})
     assert "SK하이닉스" in msg
     assert "Long" in msg or "L10x" in msg
 
 
 def test_format_message_no_positions():
     account = {**SAMPLE_ACCOUNT, "positions": [], "_pool_details": []}
-    msg = format_position_message(account, [])
+    msg = format_position_message(account, [], {})
     assert "활성 포지션 없음" in msg

@@ -1,10 +1,13 @@
 """Lighter 포지션 조회 및 포맷 — REST 읽기 전용 (인증 불필요)"""
 
+import inspect
 import httpx
 from datetime import datetime, timezone, timedelta
 from config import API_BASE, LIGHTER_WALLET, AEST_OFFSET, HEADERS
 
 AEST = timezone(timedelta(hours=AEST_OFFSET))
+# 8시간 펀딩 주기 * 연간 365일 = 1095 periods/year
+FUNDING_PERIODS_PER_YEAR = 1095
 
 SYMBOL_NAMES: dict[str, str] = {
     "SKHYNIXUSD": "SK하이닉스",
@@ -72,6 +75,44 @@ async def fetch_pool_meta(client: httpx.AsyncClient, pool_index: int) -> dict | 
     return None
 
 
+async def _fetch_funding_rates() -> dict[int, float]:
+    """market_id -> rate (8h 기준, lighter exchange 우선, 없으면 binance fallback)"""
+    try:
+        import lighter as lighter_sdk
+        cfg = lighter_sdk.Configuration(host="https://mainnet.zklighter.elliot.ai")
+        async with lighter_sdk.ApiClient(cfg) as api_client:
+            fa = lighter_sdk.FundingApi(api_client)
+            result = fa.funding_rates()
+            if inspect.isawaitable(result):
+                result = await result
+
+            # exchange 우선순위: lighter > binance > bybit > hyperliquid
+            priority = {"lighter": 0, "binance": 1, "bybit": 2, "hyperliquid": 3}
+            best: dict[int, tuple[int, float]] = {}  # market_id -> (priority, rate)
+            for r in result.funding_rates:
+                p = priority.get(r.exchange, 99)
+                if r.market_id not in best or p < best[r.market_id][0]:
+                    best[r.market_id] = (p, r.rate)
+            return {mid: v[1] for mid, v in best.items()}
+    except Exception:
+        return {}
+
+
+def _next_funding_info() -> tuple[str, int]:
+    """다음 펀딩 시각 문자열, 남은 분"""
+    now = datetime.now(timezone.utc)
+    current_h = now.hour
+    next_slot_h = ((current_h // 8) + 1) * 8
+    if next_slot_h >= 24:
+        next_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    else:
+        next_dt = now.replace(hour=next_slot_h, minute=0, second=0, microsecond=0)
+    secs = int((next_dt - now).total_seconds())
+    hrs, mins = secs // 3600, (secs % 3600) // 60
+    label = f"{hrs}h {mins}m 후" if hrs > 0 else f"{mins}m - 후"
+    return label, secs // 60
+
+
 def parse_positions(account: dict) -> list[dict]:
     results = []
     for p in account.get("positions", []):
@@ -95,6 +136,7 @@ def parse_positions(account: dict) -> list[dict]:
         liq_dist = ((liq - current) / current * 100) if current and liq > 0 else 0
 
         results.append({
+            "market_id": p.get("market_id"),
             "symbol": symbol,
             "name": SYMBOL_NAMES.get(symbol, symbol.replace("USD", "")),
             "side": side,
@@ -122,12 +164,23 @@ def fmt_price(v: float) -> str:
     return f"${v:,.2f}"
 
 
-def format_position_message(account: dict, positions: list[dict]) -> str:
+def _fmt_compact(v: float, is_diff: bool = False) -> str:
+    sign = "+" if is_diff and v >= 0 else ""
+    abs_v = abs(v)
+    if abs_v >= 1000:
+        return f"{sign}${v/1000:,.1f}k"
+    if abs_v >= 100:
+        return f"{sign}${v:,.0f}"
+    return f"{sign}${v:,.2f}"
+
+
+def format_position_message(account: dict, positions: list[dict], funding_rates: dict[int, float]) -> str:
     now = datetime.now(AEST).strftime("%m/%d %H:%M")
     balance = float(account.get("available_balance", "0"))
     total_value = float(account.get("total_asset_value", "0"))
     total_upnl = sum(p["upnl"] for p in positions)
     total_margin = sum(p["margin"] for p in positions)
+    next_fund_label, _ = _next_funding_info()
 
     lines = [f"⚡ Lighter — {now} AEST"]
 
@@ -140,15 +193,35 @@ def format_position_message(account: dict, positions: list[dict]) -> str:
             order_tag = f" 📋{p['orders']}" if p["orders"] > 0 else ""
             lines += [
                 "",
-                f"{'📈' if d == 'L' else '📉'} {p['name']} {d}{p['leverage']}x{order_tag}",
-                f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} | {p['size']}주 {fmt_price(p['value'])}",
+                f"{'📈' if d == 'L' else '📉'} {p['name']} {d}{p['leverage']}x{order_tag} (마진 {_fmt_compact(p['margin'])})",
+                f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} ({p['size']:.2f}주, {_fmt_compact(p['value'])})",
                 f"{pnl_e} {p['upnl']:+,.1f} ({p['pnl_pct']:+.1f}%) ⚠️{fmt_price(p['liq'])}",
             ]
 
+            # 펀딩피 라인
+            rate = funding_rates.get(p["market_id"])
+            if rate is not None:
+                direction = -1 if p["side"] == "Long" else 1
+                levered_apr_pct = rate * FUNDING_PERIODS_PER_YEAR * p["leverage"] * direction * 100
+                apr_sign = "+" if levered_apr_pct >= 0 else ""
+                apr_icon = "🟢" if levered_apr_pct >= 0 else "🔴"
+                cumulative = p["funding"]
+                cum_str = _fmt_compact(cumulative, is_diff=True)
+                lines.append(
+                    f"💸 누계 {cum_str} "
+                    f"({apr_icon}{apr_sign}{levered_apr_pct:.0f}%APR) "
+                    f"⏰{next_fund_label}"
+                )
+            else:
+                f_val = p["funding"]
+                cum_str = _fmt_compact(f_val, is_diff=True)
+                lines.append(f"💸 누계 {cum_str} | ⏰{next_fund_label}")
+
     lines.append("─────────────────")
     pnl_e = "🟢" if total_upnl >= 0 else "🔴"
-    lines.append(f"{pnl_e} PnL ${total_upnl:+,.1f} | 마진 ${total_margin:,.0f}")
-    lines.append(f"💰 가용 ${balance:,.0f} | 총 ${total_value:,.0f}")
+    total_upnl_str = _fmt_compact(total_upnl, is_diff=True)
+    lines.append(f"{pnl_e} PnL {total_upnl_str} | 마진 {_fmt_compact(total_margin)}")
+    lines.append(f"💰 가용 {_fmt_compact(balance)} | 총 {_fmt_compact(total_value)}")
 
     pool_details = account.get("_pool_details", [])
     if pool_details:
@@ -156,12 +229,20 @@ def format_position_message(account: dict, positions: list[dict]) -> str:
         total_equity = sum(p["equity"] for p in pool_details)
         total_lp_pnl = sum(p["lp_pnl"] for p in pool_details)
         lp_e = "🟢" if total_lp_pnl >= 0 else "🔴"
-        lines.append(f"🏦 LP ${total_equity:,.0f} ({lp_e}${total_lp_pnl:+,.0f})")
+        total_lp_pnl_str = _fmt_compact(total_lp_pnl, is_diff=True)
+        lines.append(f"🏦 LP {_fmt_compact(total_equity)} ({lp_e}{total_lp_pnl_str})")
         for pd in pool_details:
             apy_str = f" {pd['apy']:+.1f}%" if pd.get("apy") is not None else ""
-            pnl_str = f" ({pd['lp_pnl']:+,.0f})" if pd["lp_pnl"] != 0 else ""
-            name = pd["name"].replace("Lighter Liquidity Provider (LLP)", "LLP")
-            lines.append(f"  {name} ${pd['equity']:,.0f}{pnl_str}{apy_str}")
+            pnl_val = pd["lp_pnl"]
+            pnl_str = f" ({_fmt_compact(pnl_val, is_diff=True)})" if pnl_val != 0 else ""
+            name = (
+                pd["name"]
+                .replace("Lighter Liquidity Provider (LLP)", "LLP")
+                .replace("Edge & Hedge (L/S Factors)", "Edge&Hedge")
+                .replace("$LIT Staking", "LIT Staking")
+            )
+            lit_tag = pd.get("lit_tag", "")
+            lines.append(f"  {name} {_fmt_compact(pd['equity'])}{pnl_str}{apy_str}{lit_tag}")
 
     return "\n".join(lines)
 
@@ -174,6 +255,7 @@ async def get_full_status() -> str:
             return "❌ Lighter 계정 조회 실패"
 
         lit_price = await fetch_lit_price(client)
+        funding_rates = await _fetch_funding_rates()
         pool_details = []
         for s in account.get("shares", []):
             principal = float(s.get("principal_amount", "0"))
@@ -201,4 +283,4 @@ async def get_full_status() -> str:
 
         account["_pool_details"] = sorted(pool_details, key=lambda x: x["principal"], reverse=True)
         positions = parse_positions(account)
-        return format_position_message(account, positions)
+        return format_position_message(account, positions, funding_rates)
