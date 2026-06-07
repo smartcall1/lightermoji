@@ -51,7 +51,7 @@ source venv/bin/activate
 
 # 5. 패키지 설치 및 실행
 pip install -r requirements.txt
-python lighter_bot.py
+python lighter.py
 ```
 > [!TIP]
 > Termux에서 파이썬 패키지 충돌로 골머리를 앓으실 때는 **해결책 2 (Proot-distro)** 방식을 사용하는 것이 정신 건강에 이롭사옵니다.
