@@ -4,7 +4,7 @@ Lighter DCA Bot에 `lighter_monitor` 기능이 유기적으로 통합되어 작�
 
 ## 태스크 목록
 - [x] 1. 코드 분석 및 통합 상태 검증
-  - [x] `lighter.py`, `monitor.py`, `lighter_client.py` 등의 상호작용 검토
+  - [x] `lighter_bot.py`, `monitor.py`, `lighter_client.py` 등의 상호작용 검토
   - [x] 텔레그램 명령어(/l 등) 또는 알림 시스템이 봇 내에 결합되어 있는지 확인
 - [x] 2. `README.md` 작성
   - [x] 프로젝트 개요 및 아키텍처 설명
@@ -14,6 +14,6 @@ Lighter DCA Bot에 `lighter_monitor` 기능이 유기적으로 통합되어 작�
   - [x] 변경사항 커밋 및 푸쉬 진행
 
 ## 완료 리뷰
-- `lighter.py` 내에 `monitor.py` 의 `get_full_status` 함수가 제대로 임포트되어 연동되었음을 확인했습니다.
+- `lighter_bot.py` 내에 `monitor.py` 의 `get_full_status` 함수가 제대로 임포트되어 연동되었음을 확인했습니다.
 - `/l` 명령어를 통해 실시간 포지션 및 계정 정보가 정상적으로 호출되며, 배치 성격의 정기 모니터링 또한 스케줄링되어 정상 작동하도록 구현된 것을 검증하였습니다.
 - 관련 내용을 일목요연하게 정리한 한국어 `README.md` 문서를 작성 및 추가하였고, 깃허브 원격 저장소(`main` 브랜치)로 안전하게 푸쉬 완료하였습니다.
