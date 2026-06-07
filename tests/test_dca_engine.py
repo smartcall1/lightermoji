@@ -1,5 +1,5 @@
 import pytest
-from dca_engine import _check_safety, DCASkipReason, _calc_order_price, format_dca_notification, DCAResult
+from dca_engine import _check_safety, DCASkipReason, _calc_order_price, format_dca_notification, DCAResult, _find_position
 
 SAMPLE_POSITION = {
     "symbol": "SKHYNIXUSD",
@@ -101,3 +101,37 @@ def test_format_dca_notification_error():
     msg = format_dca_notification(result)
     assert "오류" in msg
     assert "서명 실패" in msg
+
+
+def test_find_position_flexible_matching():
+    account = {
+        "positions": [
+            {
+                "symbol": "HYPEUSD",
+                "position": "10.0",
+                "avg_entry_price": "60.0",
+                "position_value": "600.0",
+                "unrealized_pnl": "0.0",
+                "liquidation_price": "40.0",
+                "allocated_margin": "200.0",
+                "initial_margin_fraction": "10",
+                "sign": 1,
+            }
+        ]
+    }
+    # "HYPE" 로 조회 시 매칭 성공 확인
+    p1 = _find_position(account, "HYPE")
+    assert p1 is not None
+    assert p1["symbol"] == "HYPEUSD"
+
+    # "HYPEUSD" 로 조회 시 매칭 성공 확인
+    p2 = _find_position(account, "HYPEUSD")
+    assert p2 is not None
+
+    # 대소문자 무관 조회 확인
+    p3 = _find_position(account, "hype")
+    assert p3 is not None
+
+    # 존재하지 않는 심볼 매칭 실패 확인
+    assert _find_position(account, "LIT") is None
+

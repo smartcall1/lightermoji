@@ -57,8 +57,10 @@ def _calc_order_price(base_price: float, retry: int, step_pct: float) -> float:
 
 
 def _find_position(account: dict, symbol: str) -> dict | None:
+    target_base = symbol.replace("USD", "").replace("USDC", "").upper()
     for p in parse_positions(account):
-        if p["symbol"] == symbol:
+        p_base = p["symbol"].replace("USD", "").replace("USDC", "").upper()
+        if p_base == target_base:
             return p
     return None
 
