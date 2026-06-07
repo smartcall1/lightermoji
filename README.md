@@ -71,6 +71,6 @@ ORDER_MAX_RETRIES=20
 ### 봇 백그라운드 상시 실행
 아래 명령어를 통해 텔레그램 봇과 함께 자동 DCA 스케줄러를 가동합니다.
 ```bash
-python marketmoji.py
+python bot.py
 ```
-*(참고: `marketmoji.py`는 `bot.py`를 호출하여 실행해 주는 진입점 스크립트입니다.)*
+*(참고: `bot.py`가 봇의 진입점 스크립트입니다.)*
