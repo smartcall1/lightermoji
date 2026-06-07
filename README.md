@@ -49,7 +49,8 @@ LIGHTER_API_KEY_INDEX=0
 LIGHTER_API_PRIVATE_KEY=your_private_key_here
 
 # DCA 및 모니터링 설정
-# 예: DCA_토큰이름=일일구매금액(USDC)
+# ※ DCA_토큰이름=일일 추가할 포지션 규모(USDC, Notional Value)
+# (예: 3배 레버리지로 DCA_HYPEUSD=30 설정 시, 포지션은 30 USDC 만큼 늘어나며 실제 증거금은 10 USDC가 사용됨)
 DCA_NVDAUSD=10
 DCA_TSLAUSD=10
 
