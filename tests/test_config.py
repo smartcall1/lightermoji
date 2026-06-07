@@ -5,9 +5,10 @@ from unittest.mock import patch
 
 def _load_config(env: dict):
     with patch.dict(os.environ, env, clear=True):
-        import config
-        importlib.reload(config)
-        return config
+        with patch('dotenv.load_dotenv'):
+            import config
+            importlib.reload(config)
+            return config
 
 
 def test_dca_config_parsing():

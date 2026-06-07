@@ -3,7 +3,7 @@
 import logging
 from datetime import time, timezone, timedelta
 
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
 from config import (
@@ -116,8 +116,17 @@ def _aest_to_utc(aest_hour: int, aest_minute: int = 0) -> time:
     return time(hour=utc_hour, minute=aest_minute, tzinfo=UTC)
 
 
+async def post_init(application: Application) -> None:
+    await application.bot.set_my_commands([
+        BotCommand("start", "봇 시작 및 도움말"),
+        BotCommand("l", "Lighter 포지션 현황 조회"),
+        BotCommand("dca", "DCA 수동 즉시 실행"),
+        BotCommand("config", "DCA 설정 현황 조회")
+    ])
+
+
 def run_bot() -> None:
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("l", cmd_lighter, filters=OWNER_FILTER))
