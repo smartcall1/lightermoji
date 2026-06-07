@@ -2,17 +2,7 @@
 
 import logging
 import httpx
-import sys
-import os
-
-# Temporarily remove local directory from sys.path to import the actual lighter-sdk package
-_current_dir = os.path.dirname(os.path.abspath(__file__))
-_orig_sys_path = sys.path.copy()
-sys.path = [p for p in sys.path if os.path.abspath(p) != _current_dir and p != '' and p != '.']
-try:
-    import lighter
-finally:
-    sys.path = _orig_sys_path
+import lighter
 
 from config import (
     BASE_URL, API_BASE, HEADERS,

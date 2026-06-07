@@ -4,7 +4,7 @@ Lighter DCA Bot에 `lighter_monitor` 기능이 유기적으로 통합되어 작�
 
 ## 태스크 목록
 - [x] 1. 코드 분석 및 통합 상태 검증
-  - [x] `lighter.py`, `monitor.py`, `lighter_client.py` 등의 상호작용 검토
+  - [x] `lighter_bot.py`, `monitor.py`, `lighter_client.py` 등의 상호작용 검토
   - [x] 텔레그램 명령어(/l 등) 또는 알림 시스템이 봇 내에 결합되어 있는지 확인
 - [x] 2. `README.md` 작성
   - [x] 프로젝트 개요 및 아키텍처 설명
@@ -14,6 +14,6 @@ Lighter DCA Bot에 `lighter_monitor` 기능이 유기적으로 통합되어 작�
   - [x] 변경사항 커밋 및 푸쉬 진행
 
 ## 완료 리뷰
-- `lighter.py`와 `monitor.py` 간의 정상적인 통합 동작 여부를 분석 완료하였습니다.
+- `lighter_bot.py`와 `monitor.py` 간의 정상적인 통합 동작 여부를 분석 완료하였습니다.
 - 텔레그램 명령어 메뉴를 자동으로 동기화하는 `post_init` 비동기 작업을 추가하여, 변경 전 남아있던 불필요한 명령어들을 자동 정리하고 실시간으로 올바른 명령어 목록이 노출되도록 개선하였습니다.
 - 수정 사항을 테스트 코드를 통해 모두 정상 검증하였고, 최종 수정본을 `lightermoji` 원격 저장소(`main` 브랜치)에 안전하게 푸쉬 완료하였습니다.
