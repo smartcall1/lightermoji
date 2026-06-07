@@ -40,7 +40,7 @@ def _parse_time(s: str) -> tuple[int, int]:
 
 DCA_TIME_AEST: tuple[int, int] = _parse_time(os.getenv("DCA_TIME_AEST", "09:00"))
 MONITOR_HOURS_AEST: list[int] = [
-    int(h.strip()) for h in os.getenv("MONITOR_HOURS_AEST", "8,12,16,20").split(",")
+    int(h.strip()) for h in os.getenv("MONITOR_HOURS_AEST", "8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23").split(",")
 ]
 
 MIN_LIQ_DISTANCE_PCT: float = float(os.getenv("MIN_LIQ_DISTANCE_PCT", "5"))
