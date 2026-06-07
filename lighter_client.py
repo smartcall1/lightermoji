@@ -125,7 +125,7 @@ async def place_limit_buy(
         return None, f"서명 실패: {err}"
 
     try:
-        tx_api.send_tx(body={"tx_type": tx_type, "tx_info": tx_info})
+        await tx_api.send_tx(tx_type=tx_type, tx_info=tx_info)
         log.info("주문 전송 완료: tx_hash=%s", tx_hash)
         return tx_hash, None
     except Exception as e:
@@ -171,7 +171,7 @@ async def cancel_order(
         return False
 
     try:
-        tx_api.send_tx(body={"tx_type": tx_type, "tx_info": tx_info})
+        await tx_api.send_tx(tx_type=tx_type, tx_info=tx_info)
         log.info("주문 취소 완료: order_index=%d", order_index)
         return True
     except Exception as e:
