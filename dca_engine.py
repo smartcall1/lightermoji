@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
-from monitor import fetch_account, parse_positions, fmt_price, SYMBOL_NAMES
+from monitor import fetch_account, parse_positions, fmt_price, fmt_liq, SYMBOL_NAMES
 from lighter_client import (
     fetch_market_info, place_limit_buy,
     fetch_tx_order_index, cancel_order, get_account_index,
@@ -180,7 +180,8 @@ def format_dca_notification(result: DCAResult) -> str:
         lines = [f"⚠️ DCA 스킵 — {name}", f"이유: {reason}"]
         p = result.position_after
         if p:
-            lines.append(f"현재 포지션: {p['size']}주 | 청산가 {fmt_price(p['liq'])} ({p['liq_dist']:.1f}% 여유)")
+            liq_dist_str = "여유충분" if p['liq_dist'] >= 999 else f"{p['liq_dist']:.1f}% 여유"
+            lines.append(f"현재 포지션: {p['size']}주 | 청산가 {fmt_liq(p['liq'])} ({liq_dist_str})")
         return "\n".join(lines)
 
     p = result.position_after
@@ -191,9 +192,10 @@ def format_dca_notification(result: DCAResult) -> str:
     ]
     if p:
         pnl_e = "🟢" if p["upnl"] >= 0 else "🔴"
+        liq_dist_str = "여유충분" if p['liq_dist'] >= 999 else f"{p['liq_dist']:.1f}% 여유"
         lines += [
             f"📊 총 포지션: {p['size']:.4f}주 ({fmt_price(p['value'])})",
-            f"⚠️ 청산가: {fmt_price(p['liq'])} ({p['liq_dist']:.1f}% 여유)",
+            f"⚠️ 청산가: {fmt_liq(p['liq'])} ({liq_dist_str})",
             f"{pnl_e} 미실현 PnL: {p['upnl']:+,.1f} ({p['pnl_pct']:+.1f}%)",
         ]
     if result.filled_usdc < result.target_usdc * 0.99:

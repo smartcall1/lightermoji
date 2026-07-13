@@ -133,7 +133,9 @@ def parse_positions(account: dict) -> list[dict]:
         current = value / size if size else entry
         pnl_pct = (upnl / (entry * size) * 100) if entry * size else 0
         leverage = round(100 / imf) if imf > 0 else 1
-        liq_dist = ((liq - current) / current * 100) if current and liq > 0 else 0
+        # liq <= 0: 거래소가 개별 청산가를 제공하지 않는 경우(예: cross-margin 공유 담보)
+        # — "청산가 0원 임박"이 아니라 "해당 없음"이므로 안전한 값(거리 무한대)으로 처리
+        liq_dist = ((liq - current) / current * 100) if current and liq > 0 else 999.0
 
         results.append({
             "market_id": p.get("market_id"),
@@ -162,6 +164,10 @@ def fmt_price(v: float) -> str:
     if abs(v) >= 100:
         return f"${v:,.1f}"
     return f"${v:,.2f}"
+
+
+def fmt_liq(v: float) -> str:
+    return "N/A" if v <= 0 else fmt_price(v)
 
 
 def _fmt_compact(v: float, is_diff: bool = False) -> str:
@@ -195,7 +201,7 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
                 "",
                 f"{'📈' if d == 'L' else '📉'} {p['name']} {d}{p['leverage']}x{order_tag} (마진 {_fmt_compact(p['margin'])})",
                 f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} ({p['size']:.2f}주, {_fmt_compact(p['value'])})",
-                f"{pnl_e} {p['upnl']:+,.1f} ({p['pnl_pct']:+.1f}%) ⚠️{fmt_price(p['liq'])}",
+                f"{pnl_e} {p['upnl']:+,.1f} ({p['pnl_pct']:+.1f}%) ⚠️{fmt_liq(p['liq'])}",
             ]
 
             # 펀딩피 라인
