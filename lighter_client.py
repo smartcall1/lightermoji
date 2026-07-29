@@ -66,8 +66,45 @@ async def fetch_market_info(symbol: str) -> dict:
     )
 
 
+async def fetch_mark_price(market_id: int) -> float | None:
+    """포지션 유무와 무관하게 현재 마크가 조회 (신규 종목 최초 매수용)."""
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(
+                f"{API_BASE}/orderBookDetails",
+                params={"market_id": market_id},
+                headers=HEADERS,
+                timeout=15,
+            )
+            r.raise_for_status()
+            details = r.json().get("order_book_details", [])
+            if details:
+                return float(details[0]["mark_price"])
+        except Exception as e:
+            log.warning("마크가 조회 실패: %s", e)
+    return None
+
+
 def encode_price(price_float: float, price_decimals: int) -> int:
     return int(round(price_float * (10 ** price_decimals)))
+
+
+async def set_leverage(market_id: int, leverage: int, account_index: int) -> str | None:
+    """마켓 레버리지 설정 (cross-margin 고정). 성공 시 None, 실패 시 에러 메시지 반환."""
+    signer = _make_signer(account_index)
+    try:
+        _tx_info, _resp, err = await signer.update_leverage(
+            market_index=market_id,
+            margin_mode=signer.CROSS_MARGIN_MODE,
+            leverage=leverage,
+            api_key_index=LIGHTER_API_KEY_INDEX,
+        )
+    except Exception as e:
+        return f"레버리지 설정 실패: {e}"
+    if err:
+        return f"레버리지 설정 실패: {err}"
+    log.info("레버리지 설정 완료: market_id=%d leverage=%dx", market_id, leverage)
+    return None
 
 
 def encode_amount(amount_float: float, size_decimals: int) -> int:

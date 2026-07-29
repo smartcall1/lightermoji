@@ -12,7 +12,7 @@ from config import (
     add_dca_market, remove_dca_market,
 )
 from monitor import get_full_status, fetch_account, parse_positions, SYMBOL_NAMES
-from lighter_client import fetch_market_info
+from lighter_client import fetch_market_info, set_leverage, get_account_index
 from dca_engine import (
     execute_dca, format_dca_notification, close_position, format_close_notification,
 )
@@ -40,8 +40,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"  /l         — 포지션 현황 (종료 버튼 포함)\n"
         f"  /dca       — DCA 즉시 실행\n"
         f"  /config    — 현재 DCA 설정\n"
-        f"  /addcoin <티커> <금액>    — DCA 종목 추가/수정\n"
-        f"  /removecoin <티커>       — DCA 종목 제거"
+        f"  /addcoin <티커> <금액> [레버리지]   — DCA 종목 추가/수정\n"
+        f"  /removecoin <티커>                — DCA 종목 제거\n"
+        f"  /leverage <티커> <배수>            — 레버리지만 변경"
     )
 
 
@@ -65,10 +66,15 @@ async def cmd_lighter(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_addcoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     args = ctx.args
-    if len(args) != 2:
-        await update.message.reply_text("사용법: /addcoin <티커> <금액>\n예: /addcoin NVDA 20")
+    if len(args) not in (2, 3):
+        await update.message.reply_text(
+            "사용법: /addcoin <티커> <금액> [레버리지]\n"
+            "예: /addcoin NVDA 20\n"
+            "예: /addcoin NVDA 20 5   (5배 레버리지로 설정)"
+        )
         return
-    ticker, amount_str = args
+    ticker, amount_str = args[0], args[1]
+    leverage_str = args[2] if len(args) == 3 else None
     ticker = ticker.upper().replace("USDC", "").replace("USD", "")
     symbol = f"{ticker}USD"
     try:
@@ -79,15 +85,64 @@ async def cmd_addcoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⚠️ 금액은 0보다 큰 숫자여야 하오.")
         return
 
+    leverage = None
+    if leverage_str is not None:
+        try:
+            leverage = int(leverage_str)
+            if leverage <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ 레버리지는 1 이상의 정수여야 하오.")
+            return
+
     try:
-        await fetch_market_info(symbol)
+        market = await fetch_market_info(symbol)
     except ValueError as e:
         await update.message.reply_text(f"❌ 유효하지 않은 종목: {e}")
         return
 
+    if leverage is not None:
+        account_index = await get_account_index()
+        err = await set_leverage(market["market_id"], leverage, account_index)
+        if err:
+            await update.message.reply_text(f"❌ {err}")
+            return
+
     add_dca_market(symbol, amount)
     name = SYMBOL_NAMES.get(symbol, ticker)
-    await update.message.reply_text(f"✅ DCA 종목 추가/수정됨 — {name}: ${amount:.0f}/일")
+    lev_str = f" ({leverage}x)" if leverage else ""
+    await update.message.reply_text(f"✅ DCA 종목 추가/수정됨 — {name}: ${amount:.0f}/일{lev_str}")
+
+
+async def cmd_leverage(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    args = ctx.args
+    if len(args) != 2:
+        await update.message.reply_text("사용법: /leverage <티커> <배수>\n예: /leverage NVDA 5")
+        return
+    ticker, leverage_str = args
+    ticker = ticker.upper().replace("USDC", "").replace("USD", "")
+    symbol = f"{ticker}USD"
+    try:
+        leverage = int(leverage_str)
+        if leverage <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ 레버리지는 1 이상의 정수여야 하오.")
+        return
+
+    try:
+        market = await fetch_market_info(symbol)
+    except ValueError as e:
+        await update.message.reply_text(f"❌ 유효하지 않은 종목: {e}")
+        return
+
+    account_index = await get_account_index()
+    err = await set_leverage(market["market_id"], leverage, account_index)
+    name = SYMBOL_NAMES.get(symbol, ticker)
+    if err:
+        await update.message.reply_text(f"❌ {err}")
+    else:
+        await update.message.reply_text(f"✅ {name} 레버리지 {leverage}x로 설정됨")
 
 
 async def cmd_removecoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -219,8 +274,9 @@ async def post_init(application: Application) -> None:
         BotCommand("l", "Lighter 포지션 현황 조회"),
         BotCommand("dca", "DCA 수동 즉시 실행"),
         BotCommand("config", "DCA 설정 현황 조회"),
-        BotCommand("addcoin", "DCA 종목 추가/수정 <티커> <금액>"),
+        BotCommand("addcoin", "DCA 종목 추가/수정 <티커> <금액> [레버리지]"),
         BotCommand("removecoin", "DCA 종목 제거 <티커>"),
+        BotCommand("leverage", "레버리지 변경 <티커> <배수>"),
     ])
 
 
@@ -233,6 +289,7 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("config", cmd_config, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("addcoin", cmd_addcoin, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("removecoin", cmd_removecoin, filters=OWNER_FILTER))
+    app.add_handler(CommandHandler("leverage", cmd_leverage, filters=OWNER_FILTER))
     app.add_handler(CallbackQueryHandler(cb_close_ask, pattern=r"^close_ask:"))
     app.add_handler(CallbackQueryHandler(cb_close_yes, pattern=r"^close_yes:"))
     app.add_handler(CallbackQueryHandler(cb_close_no, pattern=r"^close_no$"))

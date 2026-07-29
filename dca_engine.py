@@ -8,7 +8,7 @@ from enum import Enum
 
 from monitor import fetch_account, parse_positions, fmt_price, fmt_liq, SYMBOL_NAMES
 from lighter_client import (
-    fetch_market_info, place_limit_buy, place_market_close,
+    fetch_market_info, place_limit_buy, place_market_close, fetch_mark_price,
     fetch_tx_order_index, cancel_order, get_account_index,
 )
 from config import (
@@ -91,8 +91,11 @@ async def execute_dca(symbol: str, target_usdc: float) -> DCAResult:
 
     base_price = position["current"] if position else 0.0
     if base_price <= 0:
+        # 신규 종목(기존 포지션 없음) — 마크가로 기준가 조회
+        base_price = await fetch_mark_price(market["market_id"]) or 0.0
+    if base_price <= 0:
         return DCAResult(symbol=symbol, filled_usdc=0, target_usdc=target_usdc,
-                         filled_amount=0, avg_price=0, error="가격 조회 불가 (포지션 없음)")
+                         filled_amount=0, avg_price=0, error="가격 조회 불가")
 
     remaining_usdc = target_usdc
     total_filled_amount = 0.0
