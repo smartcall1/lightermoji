@@ -8,12 +8,13 @@ from enum import Enum
 
 from monitor import fetch_account, parse_positions, fmt_price, fmt_liq, SYMBOL_NAMES
 from lighter_client import (
-    fetch_market_info, place_limit_buy,
+    fetch_market_info, place_limit_buy, place_market_close,
     fetch_tx_order_index, cancel_order, get_account_index,
 )
 from config import (
     MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE,
     ORDER_RETRY_INTERVAL_SEC, ORDER_PRICE_STEP_PCT, ORDER_MAX_RETRIES,
+    CLOSE_SLIPPAGE_PCT,
 )
 
 log = logging.getLogger(__name__)
@@ -167,6 +168,86 @@ async def execute_dca(symbol: str, target_usdc: float) -> DCAResult:
         position_after=position_after,
         account_after=account,
     )
+
+
+@dataclass
+class CloseResult:
+    symbol: str
+    closed_amount: float
+    side: str
+    account_after: dict | None = None
+    error: str | None = None
+
+
+async def close_position(symbol: str) -> CloseResult:
+    """포지션 반대방향 reduce-only 시장가 주문으로 전량 종료."""
+    log.info("[CLOSE] %s 시작", symbol)
+    account_index = await get_account_index()
+    market = await fetch_market_info(symbol)
+
+    account = await fetch_account()
+    if not account:
+        return CloseResult(symbol=symbol, closed_amount=0, side="", error="계정 조회 실패")
+
+    position = _find_position(account, symbol)
+    if not position or position["size"] == 0:
+        return CloseResult(symbol=symbol, closed_amount=0, side="", error="종료할 포지션이 없음")
+
+    is_long = position["side"] == "Long"
+    is_ask = is_long  # Long 종료 = 매도, Short 종료 = 매수
+    base_amount = abs(position["size"])
+    current_price = position["current"]
+    # 매도(청산)는 최저 허용가를 낮게, 매수(청산)는 최고 허용가를 높게 — 체결 보장용 슬리피지
+    exec_price = current_price * (1 - CLOSE_SLIPPAGE_PCT / 100 if is_ask else 1 + CLOSE_SLIPPAGE_PCT / 100)
+
+    client_order_index = int(time.time()) % 1_000_000
+
+    tx_hash, err = await place_market_close(
+        market_id=market["market_id"],
+        base_amount_float=base_amount,
+        is_ask=is_ask,
+        avg_execution_price_float=exec_price,
+        price_decimals=market["price_decimals"],
+        size_decimals=market["size_decimals"],
+        client_order_index=client_order_index,
+        account_index=account_index,
+    )
+
+    if err:
+        log.error("[CLOSE] %s 주문 실패: %s", symbol, err)
+        return CloseResult(symbol=symbol, closed_amount=0, side=position["side"], error=err)
+
+    await asyncio.sleep(3)
+    account_after = await fetch_account()
+    position_after = _find_position(account_after, symbol) if account_after else None
+    remaining = position_after["size"] if position_after else 0.0
+    closed_amount = base_amount - abs(remaining)
+
+    log.info("[CLOSE] %s 완료: %.4f주 청산 (잔여 %.4f)", symbol, closed_amount, remaining)
+    return CloseResult(
+        symbol=symbol,
+        closed_amount=closed_amount,
+        side=position["side"],
+        account_after=account_after,
+    )
+
+
+def format_close_notification(result: CloseResult) -> str:
+    name = SYMBOL_NAMES.get(result.symbol, result.symbol.replace("USD", ""))
+
+    if result.error:
+        return f"❌ 종료 실패 — {name}\n{result.error}"
+
+    lines = [
+        f"✅ 포지션 종료 — {name}",
+        "─────────────────",
+        f"📉 {result.side} {result.closed_amount:.4f}주 청산 완료",
+    ]
+
+    remaining = _find_position(result.account_after, result.symbol) if result.account_after else None
+    if remaining:
+        lines.append(f"⚠️ 잔여 포지션: {remaining['size']:.4f}주 (전량 미체결 — 상태 확인 필요)")
+    return "\n".join(lines)
 
 
 def format_dca_notification(result: DCAResult) -> str:

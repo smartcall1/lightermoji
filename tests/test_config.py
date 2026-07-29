@@ -81,3 +81,30 @@ def test_headers_present():
     cfg = _load_config(env)
     assert "Origin" in cfg.HEADERS
     assert cfg.API_BASE.startswith("https://")
+
+
+def test_add_remove_dca_market(tmp_path, monkeypatch):
+    env = {
+        "TELEGRAM_BOT_TOKEN": "tok",
+        "TELEGRAM_CHAT_ID": "123",
+        "LIGHTER_WALLET": "0xABC",
+        "LIGHTER_API_KEY_INDEX": "0",
+        "LIGHTER_API_PRIVATE_KEY": "pk",
+        "DCA_TIME_AEST": "09:00",
+        "MONITOR_HOURS_AEST": "8",
+    }
+    cfg = _load_config(env)
+
+    import env_editor
+    fake_env = tmp_path / ".env"
+    fake_env.write_text("TELEGRAM_BOT_TOKEN=tok\n", encoding="utf-8")
+    monkeypatch.setattr(env_editor, "ENV_PATH", fake_env)
+
+    cfg.add_dca_market("NVDAUSD", 20.0)
+    assert cfg.DCA_MARKETS["NVDAUSD"] == 20.0
+    assert "DCA_NVDAUSD=20.0" in fake_env.read_text(encoding="utf-8")
+
+    removed = cfg.remove_dca_market("NVDAUSD")
+    assert removed is True
+    assert "NVDAUSD" not in cfg.DCA_MARKETS
+    assert "DCA_NVDAUSD" not in fake_env.read_text(encoding="utf-8")

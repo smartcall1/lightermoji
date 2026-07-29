@@ -132,6 +132,47 @@ async def place_limit_buy(
         return None, f"전송 실패: {e}"
 
 
+async def place_market_close(
+    market_id: int,
+    base_amount_float: float,
+    is_ask: bool,
+    avg_execution_price_float: float,
+    price_decimals: int,
+    size_decimals: int,
+    client_order_index: int,
+    account_index: int,
+) -> tuple[str | None, str | None]:
+    """포지션 종료용 reduce-only 시장가 주문. (tx_hash, error_msg) 반환.
+
+    is_ask: True면 매도(Long 종료), False면 매수(Short 종료).
+    avg_execution_price_float: 슬리피지 방지용 최악 허용가 (시장가 주문의 가격 상한/하한).
+    """
+    signer = _make_signer(account_index)
+
+    price_int = encode_price(avg_execution_price_float, price_decimals)
+    amount_int = encode_amount(base_amount_float, size_decimals)
+
+    try:
+        _order, resp, err = await signer.create_market_order(
+            market_index=market_id,
+            client_order_index=client_order_index,
+            base_amount=amount_int,
+            avg_execution_price=price_int,
+            is_ask=is_ask,
+            reduce_only=True,
+            api_key_index=LIGHTER_API_KEY_INDEX,
+        )
+    except Exception as e:
+        return None, f"전송 실패: {e}"
+
+    if err:
+        return None, f"주문 실패: {err}"
+
+    tx_hash = getattr(resp, "tx_hash", None)
+    log.info("종료 주문 전송 완료: tx_hash=%s", tx_hash)
+    return tx_hash, None
+
+
 async def fetch_tx_order_index(tx_hash: str) -> int | None:
     """tx_hash → Lighter order_index 조회 (취소 시 필요)."""
     async with httpx.AsyncClient() as client:

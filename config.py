@@ -48,6 +48,7 @@ MIN_AVAILABLE_BALANCE: float = float(os.getenv("MIN_AVAILABLE_BALANCE", "30"))
 ORDER_RETRY_INTERVAL_SEC: int = int(os.getenv("ORDER_RETRY_INTERVAL_SEC", "30"))
 ORDER_PRICE_STEP_PCT: float = float(os.getenv("ORDER_PRICE_STEP_PCT", "0.05"))
 ORDER_MAX_RETRIES: int = int(os.getenv("ORDER_MAX_RETRIES", "20"))
+CLOSE_SLIPPAGE_PCT: float = float(os.getenv("CLOSE_SLIPPAGE_PCT", "1.0"))
 
 BASE_URL: str = "https://mainnet.zklighter.elliot.ai"
 API_BASE: str = f"{BASE_URL}/api/v1"
@@ -58,3 +59,18 @@ HEADERS: dict[str, str] = {
     "Referer": "https://app.lighter.xyz/",
     "User-Agent": "Mozilla/5.0 (Linux; Android 14) Chrome/131.0.0.0",
 }
+
+
+def add_dca_market(symbol: str, amount: float) -> None:
+    """DCA 종목 추가/수정 — .env와 메모리 DCA_MARKETS 동시 갱신 (재시작 불필요)."""
+    from env_editor import upsert_key
+    upsert_key(f"DCA_{symbol}", str(amount))
+    DCA_MARKETS[symbol] = amount
+
+
+def remove_dca_market(symbol: str) -> bool:
+    """DCA 종목 제거. .env에 실제로 있었으면 True."""
+    from env_editor import remove_key
+    removed = remove_key(f"DCA_{symbol}")
+    DCA_MARKETS.pop(symbol, None)
+    return removed

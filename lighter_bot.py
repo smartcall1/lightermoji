@@ -3,15 +3,19 @@
 import logging
 from datetime import time, timezone, timedelta
 
-from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, ContextTypes, filters
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, filters
 
 from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     DCA_MARKETS, DCA_TIME_AEST, MONITOR_HOURS_AEST, AEST_OFFSET,
+    add_dca_market, remove_dca_market,
 )
-from monitor import get_full_status
-from dca_engine import execute_dca, format_dca_notification
+from monitor import get_full_status, fetch_account, parse_positions, SYMBOL_NAMES
+from lighter_client import fetch_market_info
+from dca_engine import (
+    execute_dca, format_dca_notification, close_position, format_close_notification,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,9 +37,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"📋 DCA 종목:\n{markets_str}\n\n"
         f"⏰ 매수 시각: AEST {h:02d}:{m:02d}\n\n"
         f"명령어:\n"
-        f"  /l      — 포지션 현황\n"
-        f"  /dca    — DCA 즉시 실행\n"
-        f"  /config — 현재 DCA 설정"
+        f"  /l         — 포지션 현황 (종료 버튼 포함)\n"
+        f"  /dca       — DCA 즉시 실행\n"
+        f"  /config    — 현재 DCA 설정\n"
+        f"  /addcoin <티커> <금액>    — DCA 종목 추가/수정\n"
+        f"  /removecoin <티커>       — DCA 종목 제거"
     )
 
 
@@ -43,10 +49,101 @@ async def cmd_lighter(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Lighter 포지션 조회 중...")
     try:
         msg = await get_full_status()
-        await update.message.reply_text(msg)
+        account = await fetch_account()
+        positions = parse_positions(account) if account else []
+        keyboard = None
+        if positions:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"❌ {p['name']} 종료", callback_data=f"close_ask:{p['symbol']}")]
+                for p in positions
+            ])
+        await update.message.reply_text(msg, reply_markup=keyboard)
     except Exception as e:
         log.exception("lighter status failed")
         await update.message.reply_text(f"❌ 조회 실패: {e}")
+
+
+async def cmd_addcoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    args = ctx.args
+    if len(args) != 2:
+        await update.message.reply_text("사용법: /addcoin <티커> <금액>\n예: /addcoin NVDA 20")
+        return
+    ticker, amount_str = args
+    ticker = ticker.upper().replace("USDC", "").replace("USD", "")
+    symbol = f"{ticker}USD"
+    try:
+        amount = float(amount_str)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ 금액은 0보다 큰 숫자여야 하오.")
+        return
+
+    try:
+        await fetch_market_info(symbol)
+    except ValueError as e:
+        await update.message.reply_text(f"❌ 유효하지 않은 종목: {e}")
+        return
+
+    add_dca_market(symbol, amount)
+    name = SYMBOL_NAMES.get(symbol, ticker)
+    await update.message.reply_text(f"✅ DCA 종목 추가/수정됨 — {name}: ${amount:.0f}/일")
+
+
+async def cmd_removecoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    args = ctx.args
+    if len(args) != 1:
+        await update.message.reply_text("사용법: /removecoin <티커>\n예: /removecoin NVDA")
+        return
+    ticker = args[0].upper().replace("USDC", "").replace("USD", "")
+    symbol = f"{ticker}USD"
+    name = SYMBOL_NAMES.get(symbol, ticker)
+    if remove_dca_market(symbol):
+        await update.message.reply_text(f"🗑️ DCA 종목 제거됨 — {name}")
+    else:
+        await update.message.reply_text(f"⚠️ {name}은(는) DCA 목록에 없었소.")
+
+
+def _is_owner(update: Update) -> bool:
+    return not TELEGRAM_CHAT_ID or update.effective_chat.id == int(TELEGRAM_CHAT_ID)
+
+
+async def cb_close_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("권한 없음", show_alert=True)
+        return
+    await query.answer()
+    symbol = query.data.split(":", 1)[1]
+    name = SYMBOL_NAMES.get(symbol, symbol.replace("USD", ""))
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ 예, 종료", callback_data=f"close_yes:{symbol}"),
+        InlineKeyboardButton("아니오", callback_data="close_no"),
+    ]])
+    await query.edit_message_text(f"⚠️ {name} 포지션을 시장가로 종료하시겠소?", reply_markup=keyboard)
+
+
+async def cb_close_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("권한 없음", show_alert=True)
+        return
+    await query.answer()
+    symbol = query.data.split(":", 1)[1]
+    await query.edit_message_text(f"⏳ {symbol} 종료 중...")
+    try:
+        result = await close_position(symbol)
+        msg = format_close_notification(result)
+    except Exception as e:
+        log.exception("close_position failed: %s", symbol)
+        msg = f"❌ 종료 실패: {e}"
+    await query.edit_message_text(msg)
+
+
+async def cb_close_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("취소됨")
 
 
 async def cmd_dca(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -121,7 +218,9 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "봇 시작 및 도움말"),
         BotCommand("l", "Lighter 포지션 현황 조회"),
         BotCommand("dca", "DCA 수동 즉시 실행"),
-        BotCommand("config", "DCA 설정 현황 조회")
+        BotCommand("config", "DCA 설정 현황 조회"),
+        BotCommand("addcoin", "DCA 종목 추가/수정 <티커> <금액>"),
+        BotCommand("removecoin", "DCA 종목 제거 <티커>"),
     ])
 
 
@@ -132,6 +231,11 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("l", cmd_lighter, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("dca", cmd_dca, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("config", cmd_config, filters=OWNER_FILTER))
+    app.add_handler(CommandHandler("addcoin", cmd_addcoin, filters=OWNER_FILTER))
+    app.add_handler(CommandHandler("removecoin", cmd_removecoin, filters=OWNER_FILTER))
+    app.add_handler(CallbackQueryHandler(cb_close_ask, pattern=r"^close_ask:"))
+    app.add_handler(CallbackQueryHandler(cb_close_yes, pattern=r"^close_yes:"))
+    app.add_handler(CallbackQueryHandler(cb_close_no, pattern=r"^close_no$"))
 
     jq = app.job_queue
 

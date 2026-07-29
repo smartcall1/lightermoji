@@ -1,5 +1,8 @@
 import pytest
-from dca_engine import _check_safety, DCASkipReason, _calc_order_price, format_dca_notification, DCAResult, _find_position
+from dca_engine import (
+    _check_safety, DCASkipReason, _calc_order_price, format_dca_notification, DCAResult, _find_position,
+    CloseResult, format_close_notification,
+)
 
 SAMPLE_POSITION = {
     "symbol": "SKHYNIXUSD",
@@ -134,4 +137,24 @@ def test_find_position_flexible_matching():
 
     # 존재하지 않는 심볼 매칭 실패 확인
     assert _find_position(account, "LIT") is None
+
+
+def test_format_close_notification_success():
+    result = CloseResult(
+        symbol="SKHYNIXUSD",
+        closed_amount=0.5,
+        side="Long",
+        account_after=SAMPLE_ACCOUNT,
+    )
+    msg = format_close_notification(result)
+    assert "종료" in msg
+    assert "SK하이닉스" in msg
+    assert "0.5000주" in msg
+
+
+def test_format_close_notification_error():
+    result = CloseResult(symbol="NVDAUSD", closed_amount=0, side="", error="종료할 포지션이 없음")
+    msg = format_close_notification(result)
+    assert "실패" in msg
+    assert "종료할 포지션이 없음" in msg
 
