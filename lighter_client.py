@@ -90,12 +90,12 @@ def encode_price(price_float: float, price_decimals: int) -> int:
 
 
 async def set_leverage(market_id: int, leverage: int, account_index: int) -> str | None:
-    """마켓 레버리지 설정 (cross-margin 고정). 성공 시 None, 실패 시 에러 메시지 반환."""
+    """마켓 레버리지 설정 (isolated-margin 고정). 성공 시 None, 실패 시 에러 메시지 반환."""
     signer = _make_signer(account_index)
     try:
         _tx_info, _resp, err = await signer.update_leverage(
             market_index=market_id,
-            margin_mode=signer.CROSS_MARGIN_MODE,
+            margin_mode=signer.ISOLATED_MARGIN_MODE,
             leverage=leverage,
             api_key_index=LIGHTER_API_KEY_INDEX,
         )
