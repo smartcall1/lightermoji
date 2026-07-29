@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
-from monitor import fetch_account, parse_positions, fmt_price, fmt_liq, SYMBOL_NAMES
+from monitor import fetch_account, parse_positions, fmt_price, fmt_liq, SYMBOL_NAMES, unit_for
 from lighter_client import (
     fetch_market_info, place_limit_buy, place_market_close, fetch_mark_price,
     fetch_tx_order_index, cancel_order, get_account_index,
@@ -237,6 +237,7 @@ async def close_position(symbol: str) -> CloseResult:
 
 def format_close_notification(result: CloseResult) -> str:
     name = SYMBOL_NAMES.get(result.symbol, result.symbol.replace("USD", ""))
+    unit = unit_for(result.symbol)
 
     if result.error:
         return f"❌ 종료 실패 — {name}\n{result.error}"
@@ -244,17 +245,18 @@ def format_close_notification(result: CloseResult) -> str:
     lines = [
         f"✅ 포지션 종료 — {name}",
         "─────────────────",
-        f"📉 {result.side} {result.closed_amount:.4f}주 청산 완료",
+        f"📉 {result.side} {result.closed_amount:.4f}{unit} 청산 완료",
     ]
 
     remaining = _find_position(result.account_after, result.symbol) if result.account_after else None
     if remaining:
-        lines.append(f"⚠️ 잔여 포지션: {remaining['size']:.4f}주 (전량 미체결 — 상태 확인 필요)")
+        lines.append(f"⚠️ 잔여 포지션: {remaining['size']:.4f}{unit} (전량 미체결 — 상태 확인 필요)")
     return "\n".join(lines)
 
 
 def format_dca_notification(result: DCAResult) -> str:
     name = SYMBOL_NAMES.get(result.symbol, result.symbol.replace("USD", ""))
+    unit = unit_for(result.symbol)
 
     if result.error:
         return f"❌ DCA 오류 — {name}\n{result.error}"
@@ -265,20 +267,20 @@ def format_dca_notification(result: DCAResult) -> str:
         p = result.position_after
         if p:
             liq_dist_str = "여유충분" if p['liq_dist'] >= 999 else f"{p['liq_dist']:.1f}% 여유"
-            lines.append(f"현재 포지션: {p['size']}주 | 청산가 {fmt_liq(p['liq'])} ({liq_dist_str})")
+            lines.append(f"현재 포지션: {p['size']}{unit} | 청산가 {fmt_liq(p['liq'])} ({liq_dist_str})")
         return "\n".join(lines)
 
     p = result.position_after
     lines = [
         f"✅ DCA 완료 — {name}",
         "─────────────────",
-        f"💰 매수: ${result.filled_usdc:.2f} → {result.filled_amount:.4f}주 @ {fmt_price(result.avg_price)}",
+        f"💰 매수: ${result.filled_usdc:.2f} → {result.filled_amount:.4f}{unit} @ {fmt_price(result.avg_price)}",
     ]
     if p:
         pnl_e = "🟢" if p["upnl"] >= 0 else "🔴"
         liq_dist_str = "여유충분" if p['liq_dist'] >= 999 else f"{p['liq_dist']:.1f}% 여유"
         lines += [
-            f"📊 총 포지션: {p['size']:.4f}주 ({fmt_price(p['value'])})",
+            f"📊 총 포지션: {p['size']:.4f}{unit} ({fmt_price(p['value'])})",
             f"⚠️ 청산가: {fmt_liq(p['liq'])} ({liq_dist_str})",
             f"{pnl_e} 미실현 PnL: {p['upnl']:+,.1f} ({p['pnl_pct']:+.1f}%)",
         ]

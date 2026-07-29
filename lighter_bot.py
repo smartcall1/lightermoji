@@ -82,7 +82,7 @@ async def cmd_addcoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("⚠️ 금액은 0보다 큰 숫자여야 하오.")
+        await update.message.reply_text("⚠️ 금액은 0보다 큰 숫자여야 해요.")
         return
 
     leverage = None
@@ -92,7 +92,7 @@ async def cmd_addcoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             if leverage <= 0:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("⚠️ 레버리지는 1 이상의 정수여야 하오.")
+            await update.message.reply_text("⚠️ 레버리지는 1 이상의 정수여야 해요.")
             return
 
     try:
@@ -127,7 +127,7 @@ async def cmd_leverage(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if leverage <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("⚠️ 레버리지는 1 이상의 정수여야 하오.")
+        await update.message.reply_text("⚠️ 레버리지는 1 이상의 정수여야 해요.")
         return
 
     try:
@@ -156,7 +156,7 @@ async def cmd_removecoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if remove_dca_market(symbol):
         await update.message.reply_text(f"🗑️ DCA 종목 제거됨 — {name}")
     else:
-        await update.message.reply_text(f"⚠️ {name}은(는) DCA 목록에 없었소.")
+        await update.message.reply_text(f"⚠️ {name}은(는) DCA 목록에 없었어요.")
 
 
 def _is_owner(update: Update) -> bool:
@@ -175,7 +175,7 @@ async def cb_close_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("✅ 예, 종료", callback_data=f"close_yes:{symbol}"),
         InlineKeyboardButton("아니오", callback_data="close_no"),
     ]])
-    await query.edit_message_text(f"⚠️ {name} 포지션을 시장가로 종료하시겠소?", reply_markup=keyboard)
+    await query.edit_message_text(f"⚠️ {name} 포지션을 시장가로 종료할까요?", reply_markup=keyboard)
 
 
 async def cb_close_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -204,7 +204,7 @@ async def cb_close_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_dca(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not DCA_MARKETS:
         await update.message.reply_text(
-            "⚠️ DCA 종목이 설정되지 않았소. .env에 DCA_SYMBOL=금액 추가 필요."
+            "⚠️ DCA 종목이 설정되지 않았어요. .env에 DCA_SYMBOL=금액 추가 필요."
         )
         return
     await update.message.reply_text(f"🚀 DCA 수동 실행 시작 ({len(DCA_MARKETS)}종목)...")

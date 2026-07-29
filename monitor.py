@@ -22,7 +22,13 @@ SYMBOL_NAMES: dict[str, str] = {
     "AMDUSD": "AMD",
     "METAUSD": "Meta",
     "COINUSD": "Coinbase",
+    "CRCLUSD": "Circle",
 }
+
+
+def unit_for(symbol: str) -> str:
+    """주식은 '주', 코인은 '개' — SYMBOL_NAMES에 등록된 종목을 주식으로 간주."""
+    return "주" if symbol in SYMBOL_NAMES else "개"
 
 
 async def fetch_account(client: httpx.AsyncClient | None = None) -> dict | None:
@@ -200,7 +206,7 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
             lines += [
                 "",
                 f"{'📈' if d == 'L' else '📉'} {p['name']} {d}{p['leverage']}x{order_tag} (마진 {_fmt_compact(p['margin'])})",
-                f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} ({p['size']:.2f}주, {_fmt_compact(p['value'])})",
+                f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} ({p['size']:.2f}{unit_for(p['symbol'])}, {_fmt_compact(p['value'])})",
                 f"{pnl_e} {p['upnl']:+,.1f} ({p['pnl_pct']:+.1f}%) ⚠️{fmt_liq(p['liq'])}",
             ]
 
