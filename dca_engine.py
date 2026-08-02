@@ -19,6 +19,8 @@ from config import (
 
 log = logging.getLogger(__name__)
 
+_active_symbols: set[str] = set()
+
 
 class DCASkipReason(Enum):
     LOW_BALANCE = "잔고 부족"
@@ -72,6 +74,18 @@ def _get_position_size(account: dict, symbol: str) -> float:
 
 
 async def execute_dca(symbol: str, target_usdc: float) -> DCAResult:
+    if symbol in _active_symbols:
+        log.warning("[DCA] %s 이미 진행 중인 요청 있음 — 중복 호출 스킵", symbol)
+        return DCAResult(symbol=symbol, filled_usdc=0, target_usdc=target_usdc,
+                         filled_amount=0, avg_price=0, error="이미 진행 중인 DCA 요청 (중복 스킵)")
+    _active_symbols.add(symbol)
+    try:
+        return await _execute_dca_inner(symbol, target_usdc)
+    finally:
+        _active_symbols.discard(symbol)
+
+
+async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
     log.info("[DCA] %s $%.2f 시작", symbol, target_usdc)
     account_index = await get_account_index()
     market = await fetch_market_info(symbol)
@@ -158,6 +172,12 @@ async def execute_dca(symbol: str, target_usdc: float) -> DCAResult:
             order_index = await fetch_tx_order_index(tx_hash)
             if order_index is not None:
                 await cancel_order(market["market_id"], order_index, account_index)
+
+        position = _find_position(account, symbol)
+        skip_reason = _check_safety(account, position, MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE)
+        if skip_reason:
+            log.warning("[DCA] %s retry 중단(%s) — 잔여 $%.2f 미체결", symbol, skip_reason.value, remaining_usdc)
+            break
 
     position_after = _find_position(account, symbol) if account else None
     avg_price = total_filled_usdc / total_filled_amount if total_filled_amount else 0

@@ -1,6 +1,8 @@
 """Lighter DCA Bot — Telegram 봇 진입점"""
 
 import logging
+import os
+import sys
 from datetime import time, timezone, timedelta
 
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,6 +27,54 @@ log = logging.getLogger(__name__)
 
 UTC = timezone.utc
 OWNER_FILTER = filters.Chat(int(TELEGRAM_CHAT_ID)) if TELEGRAM_CHAT_ID else filters.ALL
+
+LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".lighter_bot.lock")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_lock() -> None:
+    """중복 실행 방지용 PID 락. 죽은 프로세스가 남긴 락은 자동 정리."""
+    while True:
+        try:
+            fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            old_pid = None
+            try:
+                with open(LOCK_PATH) as f:
+                    old_pid = int(f.read().strip())
+            except (ValueError, OSError):
+                pass
+            if old_pid and _pid_alive(old_pid):
+                log.error("이미 실행 중인 봇 프로세스 발견 (PID %d) — 종료", old_pid)
+                sys.exit(1)
+            log.warning("오래된 락 파일 발견 (PID %s, 죽은 프로세스) — 정리 후 재시도", old_pid)
+            try:
+                os.remove(LOCK_PATH)
+            except OSError:
+                pass
+            continue
+        else:
+            with os.fdopen(fd, "w") as f:
+                f.write(str(os.getpid()))
+            return
+
+
+def _release_lock() -> None:
+    try:
+        os.remove(LOCK_PATH)
+    except OSError:
+        pass
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -281,6 +331,14 @@ async def post_init(application: Application) -> None:
 
 
 def run_bot() -> None:
+    _acquire_lock()
+    try:
+        _run_bot_locked()
+    finally:
+        _release_lock()
+
+
+def _run_bot_locked() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
