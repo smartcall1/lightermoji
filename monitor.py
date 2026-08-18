@@ -137,7 +137,8 @@ def parse_positions(account: dict) -> list[dict]:
         orders = int(p.get("open_order_count", 0))
 
         current = value / size if size else entry
-        pnl_pct = (upnl / (entry * size) * 100) if entry * size else 0
+        # 마진(투입 자본) 대비 손실률 — 청산 리스크를 체감하는 실질 지표
+        pnl_pct = (upnl / margin * 100) if margin else 0
         leverage = round(100 / imf) if imf > 0 else 1
         # liq <= 0: 거래소가 개별 청산가를 제공하지 않는 경우(예: cross-margin 공유 담보)
         # — "청산가 0원 임박"이 아니라 "해당 없음"이므로 안전한 값(거리 무한대)으로 처리

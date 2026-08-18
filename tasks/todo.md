@@ -1,17 +1,21 @@
-# 작업 계획서 (lighter_dca_bot — send_tx 오류 수정)
+# DCA 수동 실행 확인 단계 추가 작업
 
-DCA 실행 시 `send_tx() got an unexpected keyword argument 'body'` 오류가 발생하는 문제를 해결하기 위한 계획이오.
+## 체크리스트
+- [x] `tasks/todo.md` 작업 계획 수립 <!-- id: 0 -->
+- [x] `lighter_bot.py` 수정 <!-- id: 1 -->
+  - [x] `/dca` 명령어에 인라인 키보드 확인 단계 추가 (`dca_confirm`, `dca_cancel`)
+  - [x] `/dca confirm` 등 인자 입력 시 즉시 실행 분기 유지
+  - [x] `cb_dca_confirm`, `cb_dca_cancel` 콜백 핸들러 및 권한 체크 구현
+  - [x] `Application` 핸들러 등록 및 메뉴/도움말 텍스트 업데이트
+- [x] 단위 테스트 작성 및 기존 테스트 검증 <!-- id: 2 -->
+- [x] 완료 리뷰 및 문서화 <!-- id: 3 -->
 
-## 태스크 목록
-- [x] 1. `lighter_client.py` 의 `send_tx` 호출 방식 수정
-  - [x] `body={...}` 대신 `tx_type=tx_type, tx_info=tx_info` 로 직접 전달하도록 수정 (주문 생성 및 주문 취소 모두 적용)
-- [x] 2. 로컬 테스트 및 검증
-  - [x] `python -m pytest` 실행하여 테스트 문제 없는지 확인
-  - [x] 로컬 DCA 테스트 스크립트(`run_dca_test.py`)를 실행하여 트랜잭션 전송이 성공하는지 검증
-- [x] 3. 원격 저장소 푸쉬
-  - [x] 변경사항 커밋 및 푸쉬 진행
-
-## 완료 리뷰
-- `TransactionApi.send_tx` 호출 시 `body` 키워드 인자 대신 `tx_type`과 `tx_info`를 개별 인자로 직접 제공하고, 누락되어 있던 `await` 키워드를 추가하여 비동기 트랜잭션 전송 흐름을 완벽히 교정하였소.
-- 로컬 환경의 실제 `.env` 지갑 설정을 통해 HYPEUSD, LITUSD 두 종목에 대해 각각 $45 상당의 수동 DCA 테스트 실행을 완수하였소. 실시간으로 각각 $45.07 및 $45.00 의 지정가 매수 트랜잭션이 전송되고 체결 완료되는 것을 검증하였소.
-- 검증이 완료된 수정본을 `lightermoji` 원격 저장소에 최종 푸시 완료하였소. 대감께서는 원격 서버(또는 Termux 환경)에서 `git pull`을 당기신 후 즉시 봇을 실행하여 DCA 수동/자동 실행을 하실 수 있소.
+## 변경 내용 요약 (Review)
+- **`lighter_bot.py`**:
+  - `/dca` 명령어 수신 시 실행 대상 종목 목록과 총 금액을 안내하고 인라인 키보드(`⚡ 예, DCA 실행 ($...)` / `❌ 취소`) 버튼 표시.
+  - 직접 실행 파라미터(`/dca confirm`, `/dca yes`, `/dca y`, `/dca go`) 지원.
+  - 인라인 버튼 클릭 처리를 위한 `cb_dca_confirm` 및 `cb_dca_cancel` 콜백 핸들러 등록.
+  - 실행 권한 검사(`_is_owner`) 적용.
+  - 봇 메뉴 설명 및 `/start` 안내 텍스트 업데이트.
+- **`tests/test_lighter_bot.py`**:
+  - 종목 미설정, 확인 키보드 렌더링, 직접 confirm 인자 처리, 콜백 confirm/cancel(권한 체크 포함) 전체 7개 케이스 단위 테스트 작성 및 통과(35 passed).

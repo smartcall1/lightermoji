@@ -88,7 +88,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"⏰ 매수 시각: AEST {h:02d}:{m:02d}\n\n"
         f"명령어:\n"
         f"  /l         — 포지션 현황 (종료 버튼 포함)\n"
-        f"  /dca       — DCA 즉시 실행\n"
+        f"  /dca       — DCA 수동 실행 (확인 버튼)\n"
         f"  /config    — 현재 DCA 설정\n"
         f"  /addcoin <티커> <금액> [레버리지]   — DCA 종목 추가/수정\n"
         f"  /removecoin <티커>                — DCA 종목 제거\n"
@@ -251,13 +251,9 @@ async def cb_close_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text("취소됨")
 
 
-async def cmd_dca(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not DCA_MARKETS:
-        await update.message.reply_text(
-            "⚠️ DCA 종목이 설정되지 않았어요. .env에 DCA_SYMBOL=금액 추가 필요."
-        )
-        return
-    await update.message.reply_text(f"🚀 DCA 수동 실행 시작 ({len(DCA_MARKETS)}종목)...")
+async def _execute_manual_dca(chat_id: int, bot, start_msg: str | None = None) -> None:
+    if start_msg:
+        await bot.send_message(chat_id=chat_id, text=start_msg)
     for symbol, usdc in DCA_MARKETS.items():
         try:
             result = await execute_dca(symbol, usdc)
@@ -265,7 +261,69 @@ async def cmd_dca(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             log.exception("DCA failed: %s", symbol)
             msg = f"❌ {symbol} DCA 실패: {e}"
-        await update.message.reply_text(msg)
+        await bot.send_message(chat_id=chat_id, text=msg)
+
+
+async def cmd_dca(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not DCA_MARKETS:
+        await update.message.reply_text(
+            "⚠️ DCA 종목이 설정되지 않았어요. .env에 DCA_SYMBOL=금액 추가 필요."
+        )
+        return
+
+    args = ctx.args or []
+    if args and args[0].lower() in ("confirm", "yes", "y", "go"):
+        await _execute_manual_dca(
+            update.effective_chat.id,
+            ctx.bot,
+            start_msg=f"🚀 DCA 수동 즉시 실행 시작 ({len(DCA_MARKETS)}종목)...",
+        )
+        return
+
+    markets_summary = "\n".join(
+        f"• {SYMBOL_NAMES.get(sym, sym)}: ${amt:.0f}" for sym, amt in DCA_MARKETS.items()
+    )
+    total_amount = sum(DCA_MARKETS.values())
+
+    confirm_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"⚡ 예, DCA 실행 (${total_amount:.0f})", callback_data="dca_confirm"),
+        ],
+        [
+            InlineKeyboardButton("❌ 취소", callback_data="dca_cancel"),
+        ],
+    ])
+    msg = (
+        f"⚠️ <b>[DCA 수동 실행 확인]</b>\n\n"
+        f"📋 <b>실행 대상 종목 ({len(DCA_MARKETS)}개):</b>\n{markets_summary}\n\n"
+        f"💰 <b>총 매수 금액:</b> ${total_amount:.0f}\n\n"
+        f"지금 수동으로 DCA를 실행할까요?"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML", reply_markup=confirm_markup)
+
+
+async def cb_dca_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("권한 없음", show_alert=True)
+        return
+    await query.answer()
+
+    if not DCA_MARKETS:
+        await query.edit_message_text("⚠️ DCA 종목이 설정되지 않았어요.")
+        return
+
+    await query.edit_message_text(f"⏳ DCA 수동 실행 중 ({len(DCA_MARKETS)}종목)...")
+    await _execute_manual_dca(update.effective_chat.id, ctx.bot)
+
+
+async def cb_dca_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("권한 없음", show_alert=True)
+        return
+    await query.answer()
+    await query.edit_message_text("❌ <b>DCA 실행이 취소되었어요.</b>", parse_mode="HTML")
 
 
 async def cmd_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -322,7 +380,7 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
         BotCommand("start", "봇 시작 및 도움말"),
         BotCommand("l", "Lighter 포지션 현황 조회"),
-        BotCommand("dca", "DCA 수동 즉시 실행"),
+        BotCommand("dca", "DCA 수동 실행 (확인 단계 포함)"),
         BotCommand("config", "DCA 설정 현황 조회"),
         BotCommand("addcoin", "DCA 종목 추가/수정 <티커> <금액> [레버리지]"),
         BotCommand("removecoin", "DCA 종목 제거 <티커>"),
@@ -351,6 +409,8 @@ def _run_bot_locked() -> None:
     app.add_handler(CallbackQueryHandler(cb_close_ask, pattern=r"^close_ask:"))
     app.add_handler(CallbackQueryHandler(cb_close_yes, pattern=r"^close_yes:"))
     app.add_handler(CallbackQueryHandler(cb_close_no, pattern=r"^close_no$"))
+    app.add_handler(CallbackQueryHandler(cb_dca_confirm, pattern=r"^dca_confirm$"))
+    app.add_handler(CallbackQueryHandler(cb_dca_cancel, pattern=r"^dca_cancel$"))
 
     jq = app.job_queue
 
