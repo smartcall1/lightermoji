@@ -50,9 +50,9 @@ def test_fmt_price():
     # >= 1000: 소수점 없음
     assert fmt_price(1234.0) == "$1,234"
     assert fmt_price(2500.0) == "$2,500"
-    # 100~999: 소수점 1자리
-    assert fmt_price(150.5) == "$150.5"
-    assert fmt_price(100.0) == "$100.0"
+    # 소수점 둘째자리까지 표기
+    assert fmt_price(150.5) == "$150.50"
+    assert fmt_price(100.0) == "$100"
     # < 100: 소수점 2자리
     assert fmt_price(5.678) == "$5.68"
     assert fmt_price(50.12) == "$50.12"
@@ -68,4 +68,19 @@ def test_format_message_has_symbol():
 def test_format_message_no_positions():
     account = {**SAMPLE_ACCOUNT, "positions": [], "_pool_details": []}
     msg = format_position_message(account, [], {})
-    assert "활성 포지션 없음" in msg
+    assert "No active positions" in msg
+
+
+def test_format_message_funding_two_lines():
+    positions = parse_positions(SAMPLE_ACCOUNT)
+    # market_id가 없는 경우
+    msg_no_rate = format_position_message(SAMPLE_ACCOUNT, positions, {})
+    assert "💸 Funding +$1.50" in msg_no_rate
+    assert "  ⏰" in msg_no_rate
+
+    # market_id가 있는 경우
+    positions[0]["market_id"] = 1
+    funding_rates = {1: 0.0001}
+    msg_with_rate = format_position_message(SAMPLE_ACCOUNT, positions, funding_rates)
+    assert "💸 Funding +$1.50" in msg_with_rate
+    assert "%APR) ⏰" in msg_with_rate

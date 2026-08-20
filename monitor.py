@@ -217,24 +217,20 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
                 f"{pnl_e} {_fmt_num(p['upnl'], sign=True)} ({_fmt_num(p['pnl_pct'], sign=True)}%) ⚠️{fmt_liq(p['liq'])}",
             ]
 
-            # 펀딩피 라인
+            # 펀딩피 라인 (2줄 분리: 모바일 줄바꿈 방지)
+            cumulative = p["funding"]
+            cum_str = _fmt_compact(cumulative, is_diff=True)
+            lines.append(f"💸 Funding {cum_str}")
+
             rate = funding_rates.get(p["market_id"])
             if rate is not None:
                 direction = -1 if p["side"] == "Long" else 1
                 levered_apr_pct = rate * FUNDING_PERIODS_PER_YEAR * p["leverage"] * direction * 100
                 apr_sign = "+" if levered_apr_pct >= 0 else ""
                 apr_icon = "🟢" if levered_apr_pct >= 0 else "🔴"
-                cumulative = p["funding"]
-                cum_str = _fmt_compact(cumulative, is_diff=True)
-                lines.append(
-                    f"💸 Funding {cum_str} "
-                    f"({apr_icon}{apr_sign}{_fmt_pct(levered_apr_pct)}%APR) "
-                    f"⏰{next_fund_label}"
-                )
+                lines.append(f"  ({apr_icon}{apr_sign}{_fmt_pct(levered_apr_pct)}%APR) ⏰{next_fund_label}")
             else:
-                f_val = p["funding"]
-                cum_str = _fmt_compact(f_val, is_diff=True)
-                lines.append(f"💸 Funding {cum_str} | ⏰{next_fund_label}")
+                lines.append(f"  ⏰{next_fund_label}")
 
     lines.append("─────────────────")
     pnl_e = "🟢" if total_upnl >= 0 else "🔴"
