@@ -115,7 +115,7 @@ def _next_funding_info() -> tuple[str, int]:
         next_dt = now.replace(hour=next_slot_h, minute=0, second=0, microsecond=0)
     secs = int((next_dt - now).total_seconds())
     hrs, mins = secs // 3600, (secs % 3600) // 60
-    label = f"{hrs}h {mins}m 후" if hrs > 0 else f"{mins}m - 후"
+    label = f"{hrs}h{mins}m" if hrs > 0 else f"{mins}m"
     return label, secs // 60
 
 
@@ -165,26 +165,32 @@ def parse_positions(account: dict) -> list[dict]:
     return sorted(results, key=lambda x: abs(x["value"]), reverse=True)
 
 
+def _fmt_num(v: float, sign: bool = False) -> str:
+    """정수면 정수로, 소수면 소수점 둘째 자리까지 표기."""
+    s = "+" if sign and v >= 0 else ""
+    if abs(v - round(v)) < 1e-9:
+        return f"{s}{v:,.0f}"
+    return f"{s}{v:,.2f}"
+
+
 def fmt_price(v: float) -> str:
-    if abs(v) >= 1000:
-        return f"${v:,.0f}"
-    if abs(v) >= 100:
-        return f"${v:,.1f}"
-    return f"${v:,.2f}"
+    return f"${_fmt_num(v)}"
 
 
 def fmt_liq(v: float) -> str:
     return "N/A" if v <= 0 else fmt_price(v)
 
 
+def _fmt_pct(v: float) -> str:
+    return _fmt_num(v)
+
+
 def _fmt_compact(v: float, is_diff: bool = False) -> str:
-    sign = "+" if is_diff and v >= 0 else ""
+    sign = is_diff and v >= 0
     abs_v = abs(v)
     if abs_v >= 1000:
-        return f"{sign}${v/1000:,.1f}k"
-    if abs_v >= 100:
-        return f"{sign}${v:,.0f}"
-    return f"{sign}${v:,.2f}"
+        return f"{'+' if sign else ''}${_fmt_num(v / 1000)}k"
+    return f"{'+' if sign else ''}${_fmt_num(v)}"
 
 
 def format_position_message(account: dict, positions: list[dict], funding_rates: dict[int, float]) -> str:
@@ -198,7 +204,7 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
     lines = [f"⚡ Lighter — {now} AEST"]
 
     if not positions:
-        lines += ["", "활성 포지션 없음"]
+        lines += ["", "No active positions"]
     else:
         for p in positions:
             pnl_e = "🟢" if p["upnl"] >= 0 else "🔴"
@@ -206,9 +212,9 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
             order_tag = f" 📋{p['orders']}" if p["orders"] > 0 else ""
             lines += [
                 "",
-                f"{'📈' if d == 'L' else '📉'} {p['name']} {d}{p['leverage']}x{order_tag} (마진 {_fmt_compact(p['margin'])})",
-                f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} ({p['size']:.2f}{unit_for(p['symbol'])}, {_fmt_compact(p['value'])})",
-                f"{pnl_e} {p['upnl']:+,.1f} ({p['pnl_pct']:+.1f}%) ⚠️{fmt_liq(p['liq'])}",
+                f"{'📈' if d == 'L' else '📉'} {p['name']} {d}{p['leverage']}x{order_tag} (Margin {_fmt_compact(p['margin'])})",
+                f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} ({_fmt_num(p['size'])}, {_fmt_compact(p['value'])})",
+                f"{pnl_e} {_fmt_num(p['upnl'], sign=True)} ({_fmt_num(p['pnl_pct'], sign=True)}%) ⚠️{fmt_liq(p['liq'])}",
             ]
 
             # 펀딩피 라인
@@ -221,20 +227,20 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
                 cumulative = p["funding"]
                 cum_str = _fmt_compact(cumulative, is_diff=True)
                 lines.append(
-                    f"💸 누계 {cum_str} "
-                    f"({apr_icon}{apr_sign}{levered_apr_pct:.0f}%APR) "
+                    f"💸 Funding {cum_str} "
+                    f"({apr_icon}{apr_sign}{_fmt_pct(levered_apr_pct)}%APR) "
                     f"⏰{next_fund_label}"
                 )
             else:
                 f_val = p["funding"]
                 cum_str = _fmt_compact(f_val, is_diff=True)
-                lines.append(f"💸 누계 {cum_str} | ⏰{next_fund_label}")
+                lines.append(f"💸 Funding {cum_str} | ⏰{next_fund_label}")
 
     lines.append("─────────────────")
     pnl_e = "🟢" if total_upnl >= 0 else "🔴"
     total_upnl_str = _fmt_compact(total_upnl, is_diff=True)
-    lines.append(f"{pnl_e} PnL {total_upnl_str} | 마진 {_fmt_compact(total_margin)}")
-    lines.append(f"💰 가용 {_fmt_compact(balance)} | 총 {_fmt_compact(total_value)}")
+    lines.append(f"{pnl_e} PnL {total_upnl_str} | Margin {_fmt_compact(total_margin)}")
+    lines.append(f"💰 Available {_fmt_compact(balance)} | Total {_fmt_compact(total_value)}")
 
     pool_details = account.get("_pool_details", [])
     if pool_details:
@@ -245,7 +251,7 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
         total_lp_pnl_str = _fmt_compact(total_lp_pnl, is_diff=True)
         lines.append(f"🏦 LP {_fmt_compact(total_equity)} ({lp_e}{total_lp_pnl_str})")
         for pd in pool_details:
-            apy_str = f" {pd['apy']:+.1f}%" if pd.get("apy") is not None else ""
+            apy_str = f" {_fmt_num(pd['apy'], sign=True)}%" if pd.get("apy") is not None else ""
             pnl_val = pd["lp_pnl"]
             pnl_str = f" ({_fmt_compact(pnl_val, is_diff=True)})" if pnl_val != 0 else ""
             name = (
@@ -265,7 +271,7 @@ async def get_full_status() -> str:
     async with httpx.AsyncClient() as client:
         account = await fetch_account(client)
         if not account:
-            return "❌ Lighter 계정 조회 실패"
+            return "❌ Failed to fetch Lighter account"
 
         lit_price = await fetch_lit_price(client)
         funding_rates = await _fetch_funding_rates()
