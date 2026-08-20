@@ -1,4 +1,4 @@
-from monitor import parse_positions, format_position_message, fmt_price
+from monitor import parse_positions, format_position_message, fmt_price, _fmt_usd
 
 SAMPLE_ACCOUNT = {
     "available_balance": "1000.5",
@@ -58,11 +58,73 @@ def test_fmt_price():
     assert fmt_price(50.12) == "$50.12"
 
 
-def test_format_message_has_symbol():
+def test_fmt_usd_no_k_abbreviation():
+    assert _fmt_usd(18687.0) == "$18,687"
+    assert _fmt_usd(18687.50) == "$18,687.50"
+    assert _fmt_usd(3090.0) == "$3,090"
+    assert _fmt_usd(7710.0, is_diff=True) == "+$7,710"
+    assert _fmt_usd(-63.22, is_diff=True) == "$-63.22"
+    assert _fmt_usd(151980.0) == "$151,980"
+    assert _fmt_usd(23820.0, is_diff=True) == "+$23,820"
+
+
+def test_format_message_has_symbol_and_number():
     positions = parse_positions(SAMPLE_ACCOUNT)
     msg = format_position_message(SAMPLE_ACCOUNT, positions, {})
-    assert "SK하이닉스" in msg
-    assert "Long" in msg or "L10x" in msg
+    assert "1. 📈 SK하이닉스 L10x (Margin $100)" in msg
+
+
+def test_format_message_multiple_positions_numbered():
+    account = {
+        "available_balance": "10680.0",
+        "total_asset_value": "22620.0",
+        "positions": [
+            {
+                "symbol": "ETHUSD",
+                "position": "8.31",
+                "avg_entry_price": "1895.59",
+                "position_value": "18687.0",
+                "unrealized_pnl": "2926.17",
+                "liquidation_price": "1542.56",
+                "allocated_margin": "3090.0",
+                "initial_margin_fraction": "20",
+                "total_funding_paid_out": "-63.22",
+                "sign": 1,
+            },
+            {
+                "symbol": "BTCUSD",
+                "position": "0.25",
+                "avg_entry_price": "64116.10",
+                "position_value": "17030.0",
+                "unrealized_pnl": "1297.09",
+                "liquidation_price": "52140.33",
+                "allocated_margin": "3090.0",
+                "initial_margin_fraction": "20",
+                "total_funding_paid_out": "-53.96",
+                "sign": 1,
+            },
+        ],
+        "_pool_details": [
+            {
+                "name": "LLP",
+                "principal": 116600.0,
+                "equity": 119030.0,
+                "lp_pnl": 2430.0,
+                "apy": 11.65,
+            }
+        ]
+    }
+    positions = parse_positions(account)
+    msg = format_position_message(account, positions, {})
+
+    assert "1. 📈 ETH L5x (Margin $3,090)" in msg
+    assert "$1,895.59→$2,248.74 (8.31, $18,687)" in msg
+    assert "2. 📈 BTC L5x (Margin $3,090)" in msg
+    assert "$64,116.10→$68,120 (0.25, $17,030)" in msg
+    assert "Available $10,680 | Total $22,620" in msg
+    assert "🏦 LP $119,030 (🟢+$2,430)" in msg
+    assert "LLP $119,030 (+$2,430) +11.65%" in msg
+    assert "k" not in msg.lower() or "skhynix" in msg.lower()  # k 축약이 없어야 함
 
 
 def test_format_message_no_positions():
@@ -84,3 +146,4 @@ def test_format_message_funding_two_lines():
     msg_with_rate = format_position_message(SAMPLE_ACCOUNT, positions, funding_rates)
     assert "💸 Funding +$1.50" in msg_with_rate
     assert "%APR) ⏰" in msg_with_rate
+

@@ -185,12 +185,9 @@ def _fmt_pct(v: float) -> str:
     return _fmt_num(v)
 
 
-def _fmt_compact(v: float, is_diff: bool = False) -> str:
-    sign = is_diff and v >= 0
-    abs_v = abs(v)
-    if abs_v >= 1000:
-        return f"{'+' if sign else ''}${_fmt_num(v / 1000)}k"
-    return f"{'+' if sign else ''}${_fmt_num(v)}"
+def _fmt_usd(v: float, is_diff: bool = False) -> str:
+    sign = "+" if is_diff and v >= 0 else ""
+    return f"{sign}${_fmt_num(v)}"
 
 
 def format_position_message(account: dict, positions: list[dict], funding_rates: dict[int, float]) -> str:
@@ -206,20 +203,20 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
     if not positions:
         lines += ["", "No active positions"]
     else:
-        for p in positions:
+        for idx, p in enumerate(positions, 1):
             pnl_e = "🟢" if p["upnl"] >= 0 else "🔴"
             d = "L" if p["side"] == "Long" else "S"
             order_tag = f" 📋{p['orders']}" if p["orders"] > 0 else ""
             lines += [
                 "",
-                f"{'📈' if d == 'L' else '📉'} {p['name']} {d}{p['leverage']}x{order_tag} (Margin {_fmt_compact(p['margin'])})",
-                f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} ({_fmt_num(p['size'])}, {_fmt_compact(p['value'])})",
+                f"{idx}. {'📈' if d == 'L' else '📉'} {p['name']} {d}{p['leverage']}x{order_tag} (Margin {_fmt_usd(p['margin'])})",
+                f"{fmt_price(p['entry'])}→{fmt_price(p['current'])} ({_fmt_num(p['size'])}, {_fmt_usd(p['value'])})",
                 f"{pnl_e} {_fmt_num(p['upnl'], sign=True)} ({_fmt_num(p['pnl_pct'], sign=True)}%) ⚠️{fmt_liq(p['liq'])}",
             ]
 
             # 펀딩피 라인 (2줄 분리: 모바일 줄바꿈 방지)
             cumulative = p["funding"]
-            cum_str = _fmt_compact(cumulative, is_diff=True)
+            cum_str = _fmt_usd(cumulative, is_diff=True)
             lines.append(f"💸 Funding {cum_str}")
 
             rate = funding_rates.get(p["market_id"])
@@ -234,9 +231,9 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
 
     lines.append("─────────────────")
     pnl_e = "🟢" if total_upnl >= 0 else "🔴"
-    total_upnl_str = _fmt_compact(total_upnl, is_diff=True)
-    lines.append(f"{pnl_e} PnL {total_upnl_str} | Margin {_fmt_compact(total_margin)}")
-    lines.append(f"💰 Available {_fmt_compact(balance)} | Total {_fmt_compact(total_value)}")
+    total_upnl_str = _fmt_usd(total_upnl, is_diff=True)
+    lines.append(f"{pnl_e} PnL {total_upnl_str} | Margin {_fmt_usd(total_margin)}")
+    lines.append(f"💰 Available {_fmt_usd(balance)} | Total {_fmt_usd(total_value)}")
 
     pool_details = account.get("_pool_details", [])
     if pool_details:
@@ -244,12 +241,12 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
         total_equity = sum(p["equity"] for p in pool_details)
         total_lp_pnl = sum(p["lp_pnl"] for p in pool_details)
         lp_e = "🟢" if total_lp_pnl >= 0 else "🔴"
-        total_lp_pnl_str = _fmt_compact(total_lp_pnl, is_diff=True)
-        lines.append(f"🏦 LP {_fmt_compact(total_equity)} ({lp_e}{total_lp_pnl_str})")
+        total_lp_pnl_str = _fmt_usd(total_lp_pnl, is_diff=True)
+        lines.append(f"🏦 LP {_fmt_usd(total_equity)} ({lp_e}{total_lp_pnl_str})")
         for pd in pool_details:
             apy_str = f" {_fmt_num(pd['apy'], sign=True)}%" if pd.get("apy") is not None else ""
             pnl_val = pd["lp_pnl"]
-            pnl_str = f" ({_fmt_compact(pnl_val, is_diff=True)})" if pnl_val != 0 else ""
+            pnl_str = f" ({_fmt_usd(pnl_val, is_diff=True)})" if pnl_val != 0 else ""
             name = (
                 pd["name"]
                 .replace("Lighter Liquidity Provider (LLP)", "LLP")
@@ -257,7 +254,7 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
                 .replace("$LIT Staking", "LIT Staking")
             )
             lit_tag = pd.get("lit_tag", "")
-            lines.append(f"  {name} {_fmt_compact(pd['equity'])}{pnl_str}{apy_str}{lit_tag}")
+            lines.append(f"  {name} {_fmt_usd(pd['equity'])}{pnl_str}{apy_str}{lit_tag}")
 
     return "\n".join(lines)
 
