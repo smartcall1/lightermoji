@@ -279,7 +279,13 @@ async def get_full_status() -> str:
             meta = await fetch_pool_meta(client, pool_idx)
             name = (meta.get("name") or "$LIT Staking") if meta else "$LIT Staking"
             apy = float(meta["annual_percentage_yield"]) if meta and meta.get("annual_percentage_yield") else None
-            tav = float(meta["total_asset_value"]) if meta and meta.get("total_asset_value") else 0
+            # Lighter API의 total_asset_value가 total_perps_value만 반영하고
+            # total_spot_value(XAUT/rhSPY 등 실물 보유분)를 누락하는 경우가 있어 직접 합산
+            tav_perps = float(meta.get("total_perps_value", "0") or 0) if meta else 0
+            tav_spot = float(meta.get("total_spot_value", "0") or 0) if meta else 0
+            tav = (tav_perps + tav_spot) if (tav_perps or tav_spot) else (
+                float(meta["total_asset_value"]) if meta and meta.get("total_asset_value") else 0
+            )
             total_shares = int(meta.get("total_shares", 0)) if meta else 0
             is_lit = entry_usdc == "0" and not meta
             equity = (principal * lit_price) if (is_lit and lit_price) else (
