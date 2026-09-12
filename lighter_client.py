@@ -1,6 +1,8 @@
 """Lighter API 클라이언트 — 읽기(REST) + 쓰기(SDK 서명)"""
 
 import logging
+import time
+
 import httpx
 import lighter
 
@@ -210,24 +212,83 @@ async def place_market_close(
     return tx_hash, None
 
 
-async def fetch_tx_order_index(tx_hash: str) -> int | None:
-    """tx_hash → Lighter order_index 조회 (취소 시 필요)."""
+AUTH_TTL_SEC: int = 10 * 60
+_auth_cache: dict[int, tuple[str, float]] = {}
+
+
+async def get_auth_token(account_index: int) -> str:
+    """계정 조회 엔드포인트용 인증 토큰. 만료 전까지 캐시 재사용."""
+    now = time.time()
+    cached = _auth_cache.get(account_index)
+    if cached and cached[1] > now + 60:
+        return cached[0]
+
+    signer = _make_signer(account_index)
+    try:
+        auth, err = signer.create_auth_token_with_expiry(
+            AUTH_TTL_SEC, api_key_index=LIGHTER_API_KEY_INDEX
+        )
+    finally:
+        await signer.close()
+    if err:
+        raise RuntimeError(f"인증 토큰 생성 실패: {err}")
+    _auth_cache[account_index] = (auth, now + AUTH_TTL_SEC)
+    return auth
+
+
+async def _authed_get(path: str, params: dict, account_index: int) -> dict:
+    """인증이 필요한 조회 엔드포인트 호출. 실패 시 예외를 올린다.
+
+    조회 실패를 "주문 없음"으로 오인하면 중복 주문으로 이어지므로 절대 삼키지 않는다.
+    """
+    auth = await get_auth_token(account_index)
+    headers = {**HEADERS, "Authorization": auth}
     async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{API_BASE}{path}",
+            params={**params, "auth": auth},
+            headers=headers,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+def _pick_by_client_index(orders: list[dict], client_order_index: int) -> dict | None:
+    for o in orders:
         try:
-            r = await client.get(
-                f"{API_BASE}/tx",
-                params={"tx_hash": tx_hash},
-                headers=HEADERS,
-                timeout=15,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                tx_data = data.get("tx") or data.get("transaction") or {}
-                order_index = tx_data.get("order_index") or tx_data.get("index")
-                return int(order_index) if order_index is not None else None
-        except Exception as e:
-            log.warning("tx 조회 실패: %s", e)
+            if int(o.get("client_order_index")) == client_order_index:
+                return o
+        except (TypeError, ValueError):
+            continue
     return None
+
+
+async def fetch_active_order(
+    market_id: int, account_index: int, client_order_index: int
+) -> dict | None:
+    """호가창에 아직 살아있는 주문 조회. 없으면 None."""
+    data = await _authed_get(
+        "/accountActiveOrders",
+        {"account_index": account_index, "market_id": market_id},
+        account_index,
+    )
+    return _pick_by_client_index(data.get("orders", []), client_order_index)
+
+
+async def fetch_order_record(
+    market_id: int, account_index: int, client_order_index: int
+) -> dict | None:
+    """주문 최종 기록 조회 (활성 → 비활성 순). 체결량 확정에 사용."""
+    order = await fetch_active_order(market_id, account_index, client_order_index)
+    if order is not None:
+        return order
+    data = await _authed_get(
+        "/accountInactiveOrders",
+        {"account_index": account_index, "market_id": market_id, "limit": 50},
+        account_index,
+    )
+    return _pick_by_client_index(data.get("orders", []), client_order_index)
 
 
 async def cancel_order(

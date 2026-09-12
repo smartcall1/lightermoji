@@ -9,12 +9,12 @@ from enum import Enum
 from monitor import fetch_account, parse_positions, fmt_price, fmt_liq, SYMBOL_NAMES, unit_for
 from lighter_client import (
     fetch_market_info, place_limit_buy, place_market_close, fetch_mark_price,
-    fetch_tx_order_index, cancel_order, get_account_index,
+    fetch_active_order, fetch_order_record, cancel_order, get_account_index,
 )
 from config import (
     MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE,
     ORDER_RETRY_INTERVAL_SEC, ORDER_PRICE_STEP_PCT, ORDER_MAX_RETRIES,
-    CLOSE_SLIPPAGE_PCT,
+    CLOSE_SLIPPAGE_PCT, CANCEL_VERIFY_ATTEMPTS, CANCEL_VERIFY_INTERVAL_SEC,
 )
 
 log = logging.getLogger(__name__)
@@ -68,9 +68,28 @@ def _find_position(account: dict, symbol: str) -> dict | None:
     return None
 
 
-def _get_position_size(account: dict, symbol: str) -> float:
-    p = _find_position(account, symbol)
-    return p["size"] if p else 0.0
+async def _settle_order(
+    market_id: int, account_index: int, client_order_index: int
+) -> tuple[bool, dict | None]:
+    """주문의 미체결 잔량을 취소하고 최종 기록을 반환한다.
+
+    (취소 확정 여부, 주문 기록) — 취소가 확정되지 않으면 호출부는 추가 주문을 내면 안 된다.
+    """
+    live = await fetch_active_order(market_id, account_index, client_order_index)
+    cancel_confirmed = True
+
+    if live is not None:
+        cancel_confirmed = False
+        for _ in range(CANCEL_VERIFY_ATTEMPTS):
+            await cancel_order(market_id, int(live["order_index"]), account_index)
+            await asyncio.sleep(CANCEL_VERIFY_INTERVAL_SEC)
+            live = await fetch_active_order(market_id, account_index, client_order_index)
+            if live is None:
+                cancel_confirmed = True
+                break
+
+    record = await fetch_order_record(market_id, account_index, client_order_index)
+    return cancel_confirmed, record
 
 
 async def execute_dca(symbol: str, target_usdc: float) -> DCAResult:
@@ -115,6 +134,16 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
     total_filled_amount = 0.0
     total_filled_usdc = 0.0
     client_order_index = int(time.time()) % 1_000_000
+    market_id = market["market_id"]
+
+    def _fail(msg: str) -> DCAResult:
+        return DCAResult(
+            symbol=symbol, filled_usdc=total_filled_usdc, target_usdc=target_usdc,
+            filled_amount=total_filled_amount,
+            avg_price=total_filled_usdc / total_filled_amount if total_filled_amount else 0,
+            position_after=_find_position(account, symbol) if account else None,
+            account_after=account, error=msg,
+        )
 
     for retry in range(ORDER_MAX_RETRIES):
         limit_price = _calc_order_price(base_price, retry, ORDER_PRICE_STEP_PCT)
@@ -124,54 +153,65 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
             log.info("[DCA] %s 잔여 수량 최소 이하 — 완료 처리", symbol)
             break
 
-        pre_size = _get_position_size(account, symbol)
+        coi = client_order_index + retry
 
         log.info("[DCA] %s retry=%d price=%.4f amount=%.4f",
                  symbol, retry, limit_price, base_amount)
 
-        tx_hash, err = await place_limit_buy(
-            market_id=market["market_id"],
+        _tx_hash, err = await place_limit_buy(
+            market_id=market_id,
             base_amount_float=base_amount,
             price_float=limit_price,
             price_decimals=market["price_decimals"],
             size_decimals=market["size_decimals"],
-            client_order_index=client_order_index + retry,
+            client_order_index=coi,
             account_index=account_index,
         )
 
         if err:
             log.error("[DCA] %s 주문 실패: %s", symbol, err)
-            return DCAResult(symbol=symbol, filled_usdc=total_filled_usdc,
-                             target_usdc=target_usdc, filled_amount=total_filled_amount,
-                             avg_price=total_filled_usdc / total_filled_amount if total_filled_amount else 0,
-                             error=err)
+            return _fail(err)
 
         await asyncio.sleep(ORDER_RETRY_INTERVAL_SEC)
 
-        account = await fetch_account()
-        if not account:
-            log.error("[DCA] %s 체결 확인 중 계정 조회 실패", symbol)
-            break
+        # 다음 주문을 내기 전에 이번 주문의 잔량을 반드시 정리한다.
+        # 잔존 GTT 주문이 나중에 체결되면 목표액의 몇 배를 매수하게 된다.
+        try:
+            cancel_confirmed, record = await _settle_order(market_id, account_index, coi)
+        except Exception as e:
+            log.exception("[DCA] %s 주문 상태 조회 실패", symbol)
+            return _fail(f"주문 상태 조회 실패 — 중복 매수 방지를 위해 중단: {e}")
 
-        post_size = _get_position_size(account, symbol)
-        filled_this_round = max(0.0, post_size - pre_size)
-        filled_usdc_this_round = filled_this_round * limit_price
+        if record is None:
+            log.error("[DCA] %s 주문 기록 조회 불가 (coi=%d)", symbol, coi)
+            return _fail("주문 기록 조회 실패 — 체결량 미확정으로 중단")
+
+        filled_this_round = float(record.get("filled_base_amount") or 0)
+        filled_usdc_this_round = float(record.get("filled_quote_amount") or 0)
 
         total_filled_amount += filled_this_round
         total_filled_usdc += filled_usdc_this_round
-        remaining_usdc -= filled_usdc_this_round
+        remaining_usdc = max(0.0, target_usdc - total_filled_usdc)
 
-        log.info("[DCA] %s 체결: %.4f주 ($%.2f), 잔여: $%.2f",
-                 symbol, filled_this_round, filled_usdc_this_round, remaining_usdc)
+        log.info("[DCA] %s 체결: %.4f주 ($%.2f), 누적 $%.2f, 잔여: $%.2f",
+                 symbol, filled_this_round, filled_usdc_this_round,
+                 total_filled_usdc, remaining_usdc)
+
+        if not cancel_confirmed:
+            log.error("[DCA] %s 미체결 주문 취소 실패 (coi=%d) — 중단", symbol, coi)
+            return _fail(
+                f"미체결 주문 취소 실패 (coi={coi}) — 중복 매수 방지를 위해 중단. "
+                f"Lighter 앱에서 잔존 주문 확인 필요"
+            )
 
         if remaining_usdc < market["min_base_amount"] * limit_price:
             log.info("[DCA] %s 전량 체결 완료!", symbol)
             break
 
-        if tx_hash:
-            order_index = await fetch_tx_order_index(tx_hash)
-            if order_index is not None:
-                await cancel_order(market["market_id"], order_index, account_index)
+        account = await fetch_account()
+        if not account:
+            log.error("[DCA] %s 체결 확인 중 계정 조회 실패", symbol)
+            break
 
         position = _find_position(account, symbol)
         skip_reason = _check_safety(account, position, MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE)
@@ -179,6 +219,7 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
             log.warning("[DCA] %s retry 중단(%s) — 잔여 $%.2f 미체결", symbol, skip_reason.value, remaining_usdc)
             break
 
+    account = await fetch_account() or account
     position_after = _find_position(account, symbol) if account else None
     avg_price = total_filled_usdc / total_filled_amount if total_filled_amount else 0
 

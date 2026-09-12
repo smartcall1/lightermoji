@@ -49,6 +49,10 @@ ORDER_RETRY_INTERVAL_SEC: int = int(os.getenv("ORDER_RETRY_INTERVAL_SEC", "30"))
 ORDER_PRICE_STEP_PCT: float = float(os.getenv("ORDER_PRICE_STEP_PCT", "0.05"))
 ORDER_MAX_RETRIES: int = int(os.getenv("ORDER_MAX_RETRIES", "20"))
 CLOSE_SLIPPAGE_PCT: float = float(os.getenv("CLOSE_SLIPPAGE_PCT", "1.0"))
+# 미체결 주문 취소 후 호가창에서 실제로 사라졌는지 재확인하는 횟수/간격.
+# 취소가 확정되지 않으면 다음 주문을 내지 않는다 (중복 매수 방지).
+CANCEL_VERIFY_ATTEMPTS: int = int(os.getenv("CANCEL_VERIFY_ATTEMPTS", "5"))
+CANCEL_VERIFY_INTERVAL_SEC: float = float(os.getenv("CANCEL_VERIFY_INTERVAL_SEC", "2"))
 
 BASE_URL: str = "https://mainnet.zklighter.elliot.ai"
 API_BASE: str = f"{BASE_URL}/api/v1"
