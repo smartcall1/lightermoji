@@ -1,11 +1,14 @@
 """Lighter DCA Bot — Telegram 봇 진입점"""
 
+import asyncio
 import logging
 import os
 import sys
 from datetime import time, timezone, timedelta
 
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TimedOut, NetworkError
+from telegram.request import HTTPXRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, filters
 
 from config import (
@@ -251,9 +254,25 @@ async def cb_close_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text("취소됨")
 
 
+async def _send_safe_message(bot, chat_id: int, text: str, retries: int = 1) -> None:
+    for attempt in range(retries + 1):
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+            return
+        except (TimedOut, NetworkError) as e:
+            if attempt < retries:
+                log.warning("텔레그램 전송 일시 지연(%s), 1초 후 재시도 (%d/%d)", e, attempt + 1, retries)
+                await asyncio.sleep(1.0)
+            else:
+                log.warning("텔레그램 전송 최종 실패(%s), 다음 작업을 계속 진행합니다", e)
+        except Exception as e:
+            log.exception("텔레그램 전송 중 예외 발생: %s", e)
+            return
+
+
 async def _execute_manual_dca(chat_id: int, bot, start_msg: str | None = None) -> None:
     if start_msg:
-        await bot.send_message(chat_id=chat_id, text=start_msg)
+        await _send_safe_message(bot, chat_id=chat_id, text=start_msg)
     for symbol, usdc in DCA_MARKETS.items():
         try:
             result = await execute_dca(symbol, usdc)
@@ -261,7 +280,7 @@ async def _execute_manual_dca(chat_id: int, bot, start_msg: str | None = None) -
         except Exception as e:
             log.exception("DCA failed: %s", symbol)
             msg = f"❌ {symbol} DCA 실패: {e}"
-        await bot.send_message(chat_id=chat_id, text=msg)
+        await _send_safe_message(bot, chat_id=chat_id, text=msg)
 
 
 async def cmd_dca(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -313,7 +332,10 @@ async def cb_dca_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         await query.edit_message_text("⚠️ DCA 종목이 설정되지 않았어요.")
         return
 
-    await query.edit_message_text(f"⏳ DCA 수동 실행 중 ({len(DCA_MARKETS)}종목)...")
+    try:
+        await query.edit_message_text(f"⏳ DCA 수동 실행 중 ({len(DCA_MARKETS)}종목)...")
+    except Exception:
+        log.warning("수동 DCA 콜백 메시지 수정 실패 (DCA 실행 계속)")
     await _execute_manual_dca(update.effective_chat.id, ctx.bot)
 
 
@@ -345,15 +367,14 @@ async def cmd_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def job_monitor(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not TELEGRAM_CHAT_ID:
+        return
     try:
         msg = await get_full_status()
     except Exception as e:
         log.exception("monitor job failed")
         msg = f"❌ Lighter 자동 조회 실패: {e}"
-    try:
-        await ctx.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=msg)
-    except Exception:
-        log.warning("모니터 메시지 전송 실패")
+    await _send_safe_message(ctx.bot, chat_id=int(TELEGRAM_CHAT_ID), text=msg)
 
 
 async def job_dca(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -365,15 +386,20 @@ async def job_dca(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             log.exception("DCA job failed: %s", symbol)
             msg = f"❌ {symbol} DCA 실패: {e}"
-        try:
-            await ctx.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=msg)
-        except Exception:
-            log.warning("DCA 알림 전송 실패: %s", symbol)
+        if TELEGRAM_CHAT_ID:
+            await _send_safe_message(ctx.bot, chat_id=int(TELEGRAM_CHAT_ID), text=msg)
 
 
 def _aest_to_utc(aest_hour: int, aest_minute: int = 0) -> time:
     utc_hour = (aest_hour - AEST_OFFSET) % 24
     return time(hour=utc_hour, minute=aest_minute, tzinfo=UTC)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, (TimedOut, NetworkError)):
+        log.warning("Telegram 통신 일시 지연/타임아웃 (자동 복구됨): %s", context.error)
+    else:
+        log.error("Telegram 핸들러 예외 발생: %s", context.error, exc_info=context.error)
 
 
 async def post_init(application: Application) -> None:
@@ -397,7 +423,21 @@ def run_bot() -> None:
 
 
 def _run_bot_locked() -> None:
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=5.0,
+    )
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .request(request)
+        .post_init(post_init)
+        .build()
+    )
+    app.add_error_handler(on_error)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("l", cmd_lighter, filters=OWNER_FILTER))

@@ -123,3 +123,37 @@ async def test_execute_manual_dca():
         await _execute_manual_dca(12345, bot, start_msg="시작")
         assert bot.send_message.call_count == 2
         mock_dca.assert_called_once_with("NVDAUSD", 20.0)
+
+
+@pytest.mark.asyncio
+async def test_execute_manual_dca_continues_on_timeout():
+    from telegram.error import TimedOut
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=TimedOut("Timed out"))
+    with patch("lighter_bot.DCA_MARKETS", {"NVDAUSD": 20.0, "TSLAUSD": 30.0}), \
+         patch("lighter_bot.execute_dca", new_callable=AsyncMock, return_value={"mock": True}) as mock_dca, \
+         patch("lighter_bot.format_dca_notification", return_value="✅ DCA 완료"), \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        await _execute_manual_dca(12345, bot, start_msg="시작")
+        assert mock_dca.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_send_safe_message_retry_success():
+    from telegram.error import TimedOut
+    from lighter_bot import _send_safe_message
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=[TimedOut("Timed out"), None])
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await _send_safe_message(bot, 12345, "테스트 메시지", retries=1)
+    assert bot.send_message.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_on_error_handles_timeout_cleanly():
+    from telegram.error import TimedOut
+    from lighter_bot import on_error
+    context = MagicMock()
+    context.error = TimedOut("Timed out")
+    await on_error(MagicMock(), context)
+
