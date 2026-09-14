@@ -1,6 +1,6 @@
 # Termux 환경에서의 `lighter-sdk` 설치 가이드
 
-Termux(Android) 환경에서는 암호화 모듈인 `cryptography` 및 `eth-account` 등이 포함되어 있어, 단순히 `pip install lighter-sdk`를 실행하면 컴파일러나 라이브러리 링크 오류로 빌드가 실패할 수 있습니다. 아래의 두 가지 해결책 중 하나를 사용해 대처해 보소서.
+Termux(Android) 환경에서는 암호화 모듈인 `cryptography` 및 `eth-account` 등이 포함되어 있어, 단순히 `pip install lighter-sdk`를 실행하면 컴파일러나 라이브러리 링크 오류로 빌드가 실패할 수 있습니다. 아래의 두 가지 해결책 중 하나를 사용해 대처하시기 바랍니다.
 
 ---
 
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 python lighter_bot.py
 ```
 > [!TIP]
-> Termux에서 파이썬 패키지 충돌로 골머리를 앓으실 때는 **해결책 2 (Proot-distro)** 방식을 사용하는 것이 정신 건강에 이롭사옵니다.
+> Termux에서 파이썬 패키지 충돌로 골머리를 앓으실 때는 **해결책 2 (Proot-distro)** 방식을 사용하는 것이 정신 건강에 이롭습니다.
 > 
 > 또한 화면이 꺼졌을 때 안드로이드 절전 모드로 인해 텔레그램 네트워크 타임아웃이 발생하는 것을 방지하려면:
 > 1. Termux 메인 쉘(우분투 진입 전)에서 `termux-wake-lock` 실행

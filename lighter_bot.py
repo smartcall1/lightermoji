@@ -238,27 +238,37 @@ async def cb_close_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await query.answer()
     symbol = query.data.split(":", 1)[1]
-    await query.edit_message_text(f"⏳ {symbol} 종료 중...")
+    try:
+        await query.edit_message_text(f"⏳ {symbol} 종료 중...")
+    except Exception:
+        log.warning("포지션 종료 콜백 메시지 수정 실패 (종료 실행 계속)")
     try:
         result = await close_position(symbol)
         msg = format_close_notification(result)
     except Exception as e:
         log.exception("close_position failed: %s", symbol)
         msg = f"❌ 종료 실패: {e}"
-    await query.edit_message_text(msg)
+    try:
+        await query.edit_message_text(msg)
+    except Exception:
+        log.warning("콜백 메시지 수정 실패, 일반 메시지로 대체 전송 시도: %s", symbol)
+        await _send_safe_message(ctx.bot, chat_id=update.effective_chat.id, text=msg)
 
 
 async def cb_close_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("권한 없음", show_alert=True)
+        return
     await query.answer()
     await query.edit_message_text("취소됨")
 
 
-async def _send_safe_message(bot, chat_id: int, text: str, retries: int = 1) -> None:
+async def _send_safe_message(bot, chat_id: int, text: str, retries: int = 1, **kwargs) -> bool:
     for attempt in range(retries + 1):
         try:
-            await bot.send_message(chat_id=chat_id, text=text)
-            return
+            await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+            return True
         except (TimedOut, NetworkError) as e:
             if attempt < retries:
                 log.warning("텔레그램 전송 일시 지연(%s), 1초 후 재시도 (%d/%d)", e, attempt + 1, retries)
@@ -267,7 +277,8 @@ async def _send_safe_message(bot, chat_id: int, text: str, retries: int = 1) -> 
                 log.warning("텔레그램 전송 최종 실패(%s), 다음 작업을 계속 진행합니다", e)
         except Exception as e:
             log.exception("텔레그램 전송 중 예외 발생: %s", e)
-            return
+            return False
+    return False
 
 
 async def _execute_manual_dca(chat_id: int, bot, start_msg: str | None = None) -> None:

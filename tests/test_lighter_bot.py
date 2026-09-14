@@ -6,6 +6,7 @@ from lighter_bot import (
     cmd_dca,
     cb_dca_confirm,
     cb_dca_cancel,
+    cb_close_yes,
     _execute_manual_dca,
 )
 
@@ -145,15 +146,92 @@ async def test_send_safe_message_retry_success():
     bot = MagicMock()
     bot.send_message = AsyncMock(side_effect=[TimedOut("Timed out"), None])
     with patch("asyncio.sleep", new_callable=AsyncMock):
-        await _send_safe_message(bot, 12345, "테스트 메시지", retries=1)
+        res = await _send_safe_message(bot, 12345, "테스트 메시지", retries=1, parse_mode="HTML")
+    assert res is True
+    assert bot.send_message.call_count == 2
+    assert bot.send_message.call_args[1].get("parse_mode") == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_send_safe_message_all_attempts_fail():
+    from telegram.error import TimedOut
+    from lighter_bot import _send_safe_message
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=TimedOut("Timed out"))
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        res = await _send_safe_message(bot, 12345, "테스트 메시지", retries=1)
+    assert res is False
     assert bot.send_message.call_count == 2
 
 
 @pytest.mark.asyncio
-async def test_on_error_handles_timeout_cleanly():
+async def test_on_error_handles_timeout_cleanly(caplog):
+    import logging
     from telegram.error import TimedOut
     from lighter_bot import on_error
     context = MagicMock()
     context.error = TimedOut("Timed out")
-    await on_error(MagicMock(), context)
+    with caplog.at_level(logging.WARNING):
+        await on_error(MagicMock(), context)
+    assert "Telegram 통신 일시 지연/타임아웃" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cb_dca_confirm_continues_when_edit_message_fails(mock_callback_update, mock_context):
+    from telegram.error import TimedOut
+    mock_callback_update.callback_query.edit_message_text.side_effect = TimedOut("Timed out")
+    with patch("lighter_bot._is_owner", return_value=True), \
+         patch("lighter_bot.DCA_MARKETS", {"NVDAUSD": 20.0}), \
+         patch("lighter_bot._execute_manual_dca", new_callable=AsyncMock) as mock_exec:
+        await cb_dca_confirm(mock_callback_update, mock_context)
+        mock_exec.assert_called_once_with(123456789, mock_context.bot)
+
+
+@pytest.mark.asyncio
+async def test_cb_close_yes_happy_path(mock_callback_update, mock_context):
+    mock_callback_update.callback_query.data = "close_yes:NVDAUSD"
+    with patch("lighter_bot._is_owner", return_value=True), \
+         patch("lighter_bot.close_position", new_callable=AsyncMock, return_value={"mock": True}) as mock_close, \
+         patch("lighter_bot.format_close_notification", return_value="✅ NVDA 종료 완료"), \
+         patch("lighter_bot._send_safe_message", new_callable=AsyncMock) as mock_safe_send:
+        await cb_close_yes(mock_callback_update, mock_context)
+        mock_close.assert_called_once_with("NVDAUSD")
+        assert mock_callback_update.callback_query.edit_message_text.call_count == 2
+        mock_safe_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cb_close_yes_continues_when_edit_message_fails(mock_callback_update, mock_context):
+    from telegram.error import TimedOut
+    mock_callback_update.callback_query.data = "close_yes:NVDAUSD"
+    mock_callback_update.callback_query.edit_message_text.side_effect = TimedOut("Timed out")
+    with patch("lighter_bot._is_owner", return_value=True), \
+         patch("lighter_bot.close_position", new_callable=AsyncMock, return_value={"mock": True}) as mock_close, \
+         patch("lighter_bot.format_close_notification", return_value="✅ NVDA 종료 완료"), \
+         patch("lighter_bot._send_safe_message", new_callable=AsyncMock) as mock_safe_send:
+        await cb_close_yes(mock_callback_update, mock_context)
+        mock_close.assert_called_once_with("NVDAUSD")
+        mock_safe_send.assert_called_once_with(
+            mock_context.bot, chat_id=123456789, text="✅ NVDA 종료 완료"
+        )
+
+
+@pytest.mark.asyncio
+async def test_cb_close_no_owner(mock_callback_update, mock_context):
+    from lighter_bot import cb_close_no
+    with patch("lighter_bot._is_owner", return_value=True):
+        await cb_close_no(mock_callback_update, mock_context)
+        mock_callback_update.callback_query.answer.assert_called_once()
+        mock_callback_update.callback_query.edit_message_text.assert_called_once_with("취소됨")
+
+
+@pytest.mark.asyncio
+async def test_cb_close_no_non_owner(mock_callback_update, mock_context):
+    from lighter_bot import cb_close_no
+    with patch("lighter_bot._is_owner", return_value=False):
+        await cb_close_no(mock_callback_update, mock_context)
+        mock_callback_update.callback_query.answer.assert_called_once_with("권한 없음", show_alert=True)
+        mock_callback_update.callback_query.edit_message_text.assert_not_called()
+
+
 
