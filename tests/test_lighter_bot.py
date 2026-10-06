@@ -235,3 +235,22 @@ async def test_cb_close_no_non_owner(mock_callback_update, mock_context):
 
 
 
+
+
+def test_owner_filter_and_is_owner_only_pass_configured_chat():
+    import lighter_bot
+    from telegram import Chat, Message, Update
+    from telegram.ext import filters
+
+    assert isinstance(lighter_bot.OWNER_FILTER, filters.Chat)
+    with patch("lighter_bot.TELEGRAM_CHAT_ID", "123456"):
+        for cid, expected in [(123456, True), (999, False)]:
+            upd = MagicMock()
+            upd.effective_chat.id = cid
+            assert lighter_bot._is_owner(upd) is expected
+        upd = MagicMock()
+        upd.effective_chat = None
+        assert lighter_bot._is_owner(upd) is False
+    msg = lambda cid: Message(1, None, Chat(cid, "private"))
+    assert lighter_bot.OWNER_FILTER.check_update(Update(1, message=msg(123456)))
+    assert not lighter_bot.OWNER_FILTER.check_update(Update(2, message=msg(999)))

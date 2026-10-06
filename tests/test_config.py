@@ -108,3 +108,34 @@ def test_add_remove_dca_market(tmp_path, monkeypatch):
     assert removed is True
     assert "NVDAUSD" not in cfg.DCA_MARKETS
     assert "DCA_NVDAUSD" not in fake_env.read_text(encoding="utf-8")
+
+
+def _base_env(chat_id):
+    return {
+        "TELEGRAM_BOT_TOKEN": "tok",
+        "TELEGRAM_CHAT_ID": chat_id,
+        "LIGHTER_WALLET": "0xABC",
+        "LIGHTER_API_KEY_INDEX": "2",
+        "LIGHTER_API_PRIVATE_KEY": "privkey",
+    }
+
+
+import pytest
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "abc", "12a", "1.5"])
+def test_chat_id_invalid_refuses_start(bad):
+    with pytest.raises(RuntimeError, match="TELEGRAM_CHAT_ID"):
+        _load_config(_base_env(bad))
+
+
+def test_chat_id_missing_refuses_start():
+    env = _base_env("1")
+    del env["TELEGRAM_CHAT_ID"]
+    with pytest.raises(RuntimeError, match="TELEGRAM_CHAT_ID"):
+        _load_config(env)
+
+
+def test_chat_id_valid_accepts_negative_group_id():
+    assert _load_config(_base_env(" -1001234 ")).TELEGRAM_CHAT_ID == "-1001234"
+    assert _load_config(_base_env("123")).TELEGRAM_CHAT_ID == "123"

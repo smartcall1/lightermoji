@@ -4,7 +4,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID: str = os.environ["TELEGRAM_CHAT_ID"]
+
+
+def _require_chat_id() -> str:
+    raw = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    try:
+        int(raw)
+    except ValueError:
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID가 비었거나 정수가 아닙니다. 본인 chat id(숫자)를 .env에 설정하세요. "
+            "(비어 있으면 누구나 주문 명령을 보낼 수 있어 시작을 거부합니다)"
+        ) from None
+    return raw
+
+
+TELEGRAM_CHAT_ID: str = _require_chat_id()
 
 LIGHTER_WALLET: str = os.environ["LIGHTER_WALLET"]
 LIGHTER_ACCOUNT_INDEX: int | None = (
