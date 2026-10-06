@@ -31,7 +31,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 UTC = timezone.utc
-OWNER_FILTER = filters.Chat(int(TELEGRAM_CHAT_ID)) if TELEGRAM_CHAT_ID else filters.ALL
+OWNER_FILTER = filters.Chat(int(TELEGRAM_CHAT_ID))
 
 LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".lighter_bot.lock")
 
@@ -215,7 +215,7 @@ async def cmd_removecoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
 
 def _is_owner(update: Update) -> bool:
-    return not TELEGRAM_CHAT_ID or update.effective_chat.id == int(TELEGRAM_CHAT_ID)
+    return update.effective_chat is not None and update.effective_chat.id == int(TELEGRAM_CHAT_ID)
 
 
 async def cb_close_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -380,8 +380,6 @@ async def cmd_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def job_monitor(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not TELEGRAM_CHAT_ID:
-        return
     try:
         msg = await get_full_status()
     except Exception as e:
@@ -399,8 +397,7 @@ async def job_dca(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             log.exception("DCA job failed: %s", symbol)
             msg = f"❌ {symbol} DCA 실패: {e}"
-        if TELEGRAM_CHAT_ID:
-            await _send_safe_message(ctx.bot, chat_id=int(TELEGRAM_CHAT_ID), text=msg)
+        await _send_safe_message(ctx.bot, chat_id=int(TELEGRAM_CHAT_ID), text=msg)
 
 
 def _aest_to_utc(aest_hour: int, aest_minute: int = 0) -> time:
