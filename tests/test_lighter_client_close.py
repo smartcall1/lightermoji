@@ -98,3 +98,16 @@ def test_cancel_closes(monkeypatch):
         _patch(monkeypatch, s, t)
         asyncio.run(lc.cancel_order(1, 5, 1))
         assert s.api_client.closed and t.api_client.closed
+
+
+def test_close_failure_keeps_result_and_closes_other(monkeypatch):
+    s, t = FakeSigner(), FakeTxApi()
+
+    async def bad_close():
+        raise RuntimeError("close boom")
+
+    s.close = bad_close
+    _patch(monkeypatch, s, t)
+    tx_hash, err = asyncio.run(_buy())
+    assert tx_hash == "hash" and err is None
+    assert t.api_client.closed

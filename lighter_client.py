@@ -137,9 +137,13 @@ async def _close_clients(signer, tx_api=None) -> None:
     """signer/tx_api 가 각자 만든 ApiClient(aiohttp 세션)를 닫는다. 예외 경로에서도 호출."""
     try:
         await signer.close()
-    finally:
-        if tx_api is not None:
+    except Exception as e:
+        log.warning("signer 세션 close 실패: %s", e)
+    if tx_api is not None:
+        try:
             await tx_api.api_client.close()
+        except Exception as e:
+            log.warning("tx_api 세션 close 실패: %s", e)
 
 
 async def place_limit_buy(
