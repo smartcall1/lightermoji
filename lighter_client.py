@@ -103,6 +103,8 @@ async def set_leverage(market_id: int, leverage: int, account_index: int) -> str
         )
     except Exception as e:
         return f"레버리지 설정 실패: {e}"
+    finally:
+        await _close_clients(signer)
     if err:
         return f"레버리지 설정 실패: {err}"
     log.info("레버리지 설정 완료: market_id=%d leverage=%dx", market_id, leverage)
@@ -131,6 +133,19 @@ def _make_tx_api() -> lighter.TransactionApi:
     return lighter.TransactionApi(api_client)
 
 
+async def _close_clients(signer, tx_api=None) -> None:
+    """signer/tx_api 가 각자 만든 ApiClient(aiohttp 세션)를 닫는다. 예외 경로에서도 호출."""
+    try:
+        await signer.close()
+    except Exception as e:
+        log.warning("signer 세션 close 실패: %s", e)
+    if tx_api is not None:
+        try:
+            await tx_api.api_client.close()
+        except Exception as e:
+            log.warning("tx_api 세션 close 실패: %s", e)
+
+
 async def place_limit_buy(
     market_id: int,
     base_amount_float: float,
@@ -143,7 +158,19 @@ async def place_limit_buy(
     """지정가 매수 주문 전송. (tx_hash, error_msg) 반환."""
     signer = _make_signer(account_index)
     tx_api = _make_tx_api()
+    try:
+        return await _place_limit_buy(
+            signer, tx_api, market_id, base_amount_float, price_float,
+            price_decimals, size_decimals, client_order_index,
+        )
+    finally:
+        await _close_clients(signer, tx_api)
 
+
+async def _place_limit_buy(
+    signer, tx_api, market_id, base_amount_float, price_float,
+    price_decimals, size_decimals, client_order_index,
+) -> tuple[str | None, str | None]:
     price_int = encode_price(price_float, price_decimals)
     amount_int = encode_amount(base_amount_float, size_decimals)
 
@@ -187,7 +214,20 @@ async def place_market_close(
     avg_execution_price_float: 슬리피지 방지용 최악 허용가 (시장가 주문의 가격 상한/하한).
     """
     signer = _make_signer(account_index)
+    try:
+        return await _place_market_close(
+            signer, market_id, base_amount_float, is_ask,
+            avg_execution_price_float, price_decimals, size_decimals,
+            client_order_index,
+        )
+    finally:
+        await _close_clients(signer)
 
+
+async def _place_market_close(
+    signer, market_id, base_amount_float, is_ask, avg_execution_price_float,
+    price_decimals, size_decimals, client_order_index,
+) -> tuple[str | None, str | None]:
     price_int = encode_price(avg_execution_price_float, price_decimals)
     amount_int = encode_amount(base_amount_float, size_decimals)
 
@@ -299,7 +339,13 @@ async def cancel_order(
     """지정 order_index 취소. 성공 여부 반환."""
     signer = _make_signer(account_index)
     tx_api = _make_tx_api()
+    try:
+        return await _cancel_order(signer, tx_api, market_id, order_index)
+    finally:
+        await _close_clients(signer, tx_api)
 
+
+async def _cancel_order(signer, tx_api, market_id, order_index) -> bool:
     tx_type, tx_info, tx_hash, err = signer.sign_cancel_order(
         market_index=market_id,
         order_index=order_index,
