@@ -324,3 +324,46 @@ async def test_immediate_full_fill_places_single_order(monkeypatch):
     assert len(ex.placed) == 1
     assert ex.cancels == []
     assert result.filled_usdc == pytest.approx(200.0, rel=0.02)
+
+
+class _FlakyExchange(_FakeExchange):
+    """주문 상태 조회(fetch_active_order)가 처음 fail_times 번 타임아웃 나는 거래소."""
+
+    def __init__(self, fill_plan, fail_times):
+        super().__init__(fill_plan)
+        self.fail_times = fail_times
+        self.status_calls = 0
+
+    async def fetch_active_order(self, market_id, account_index, client_order_index):
+        self.status_calls += 1
+        if self.status_calls <= self.fail_times:
+            raise TimeoutError("ReadTimeout")
+        return await super().fetch_active_order(market_id, account_index, client_order_index)
+
+
+async def test_settle_retries_transient_status_timeout(monkeypatch):
+    """체결 확인 조회가 잠깐 타임아웃 나도 다시 물어 체결을 확인해야 한다 (10-14 BNB·SOL)."""
+    from dca_engine import _execute_dca_inner
+
+    ex = _FlakyExchange(fill_plan={0: 1.0}, fail_times=2)
+    _install(monkeypatch, ex)
+
+    result = await _execute_dca_inner("BNBUSD", 200.0)
+
+    assert result.error is None
+    assert len(ex.placed) == 1
+    assert result.filled_usdc == pytest.approx(200.0, rel=0.02)
+
+
+async def test_settle_gives_up_after_retries_without_new_order(monkeypatch):
+    """조회가 계속 실패하면 추가 주문 없이 중단해야 한다."""
+    from dca_engine import _execute_dca_inner, SETTLE_ATTEMPTS
+
+    ex = _FlakyExchange(fill_plan={0: 0.0}, fail_times=99)
+    _install(monkeypatch, ex)
+
+    result = await _execute_dca_inner("BNBUSD", 200.0)
+
+    assert len(ex.placed) == 1, f"조회 실패 중 추가 주문 발생: {ex.events}"
+    assert ex.status_calls == SETTLE_ATTEMPTS
+    assert result.error is not None and "주문 상태 조회 실패" in result.error

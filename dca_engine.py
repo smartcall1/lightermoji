@@ -15,6 +15,7 @@ from config import (
     MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE,
     ORDER_RETRY_INTERVAL_SEC, ORDER_PRICE_STEP_PCT, ORDER_MAX_RETRIES,
     CLOSE_SLIPPAGE_PCT, CANCEL_VERIFY_ATTEMPTS, CANCEL_VERIFY_INTERVAL_SEC,
+    SETTLE_ATTEMPTS, SETTLE_RETRY_SEC,
 )
 
 log = logging.getLogger(__name__)
@@ -176,11 +177,19 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
 
         # 다음 주문을 내기 전에 이번 주문의 잔량을 반드시 정리한다.
         # 잔존 GTT 주문이 나중에 체결되면 목표액의 몇 배를 매수하게 된다.
-        try:
-            cancel_confirmed, record = await _settle_order(market_id, account_index, coi)
-        except Exception as e:
-            log.exception("[DCA] %s 주문 상태 조회 실패", symbol)
-            return _fail(f"주문 상태 조회 실패 — 중복 매수 방지를 위해 중단: {e}")
+        # 조회는 읽기라 다시 물어도 안전하다. 라이터가 잠깐 느린 것만으로 멈추지 않게 몇 번 재시도하고,
+        # 끝내 실패하면 체결량을 모르는 채로 추가 주문하지 않도록 중단한다 (10-14 BNB·SOL ReadTimeout).
+        for attempt in range(1, SETTLE_ATTEMPTS + 1):
+            try:
+                cancel_confirmed, record = await _settle_order(market_id, account_index, coi)
+                break
+            except Exception as e:
+                if attempt == SETTLE_ATTEMPTS:
+                    log.exception("[DCA] %s 주문 상태 조회 실패 (%d회)", symbol, attempt)
+                    return _fail(f"주문 상태 조회 실패 — 중복 매수 방지를 위해 중단: {e}")
+                log.warning("[DCA] %s 주문 상태 조회 실패 (%d/%d) — %.0f초 후 재시도: %r",
+                            symbol, attempt, SETTLE_ATTEMPTS, SETTLE_RETRY_SEC, e)
+                await asyncio.sleep(SETTLE_RETRY_SEC)
 
         if record is None:
             log.error("[DCA] %s 주문 기록 조회 불가 (coi=%d)", symbol, coi)

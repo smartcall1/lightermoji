@@ -67,6 +67,9 @@ CLOSE_SLIPPAGE_PCT: float = float(os.getenv("CLOSE_SLIPPAGE_PCT", "1.0"))
 # 취소가 확정되지 않으면 다음 주문을 내지 않는다 (중복 매수 방지).
 CANCEL_VERIFY_ATTEMPTS: int = int(os.getenv("CANCEL_VERIFY_ATTEMPTS", "5"))
 CANCEL_VERIFY_INTERVAL_SEC: float = float(os.getenv("CANCEL_VERIFY_INTERVAL_SEC", "2"))
+# 주문 후 체결 확인(잔량 취소·기록 조회)이 네트워크 오류로 실패할 때 다시 묻는 횟수/간격.
+SETTLE_ATTEMPTS: int = max(1, int(os.getenv("SETTLE_ATTEMPTS", "3")))
+SETTLE_RETRY_SEC: float = float(os.getenv("SETTLE_RETRY_SEC", "5"))
 
 BASE_URL: str = "https://mainnet.zklighter.elliot.ai"
 API_BASE: str = f"{BASE_URL}/api/v1"
