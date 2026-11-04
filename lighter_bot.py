@@ -17,6 +17,28 @@ from config import (
     add_dca_market, remove_dca_market,
 )
 from monitor import get_full_status, fetch_account, parse_positions, SYMBOL_NAMES
+
+JOB_MISFIRE_GRACE_SEC = 1800  # 스케줄 잡이 이만큼 늦게 깨도 건너뛰지 않고 실행(11-05)
+
+
+def register_jobs(jq):
+    """DCA·모니터 잡 등록.
+
+    11-05: 폰 부하로 스케줄러가 7~58분 늦게 깨면 APScheduler 기본 misfire_grace_time(1초)
+    때문에 잡이 "was missed by" 경고만 남기고 통째로 건너뛰어졌다. 늦어도 30분 안이면 실행하고,
+    여러 번 밀린 건 한 번으로 합친다(coalesce).
+    """
+    late_ok = {"misfire_grace_time": JOB_MISFIRE_GRACE_SEC, "coalesce": True}
+
+    dca_h, dca_m = DCA_TIME_AEST
+    dca_utc = _aest_to_utc(dca_h, dca_m)
+    jq.run_daily(job_dca, time=dca_utc, name="dca_daily", job_kwargs=late_ok)
+    log.info("DCA 잡 등록: AEST %02d:%02d (UTC %s)", dca_h, dca_m, dca_utc)
+
+    for aest_h in MONITOR_HOURS_AEST:
+        utc_t = _aest_to_utc(aest_h)
+        jq.run_daily(job_monitor, time=utc_t, name=f"monitor_{aest_h:02d}aest", job_kwargs=late_ok)
+    log.info("모니터 잡 등록: AEST %s", ", ".join(f"{h:02d}:00" for h in MONITOR_HOURS_AEST))
 from lighter_client import fetch_market_info, set_leverage, get_account_index
 from dca_engine import (
     execute_dca, format_dca_notification, close_position, format_close_notification,
@@ -462,17 +484,7 @@ def _run_bot_locked() -> None:
     app.add_handler(CallbackQueryHandler(cb_dca_confirm, pattern=r"^dca_confirm$"))
     app.add_handler(CallbackQueryHandler(cb_dca_cancel, pattern=r"^dca_cancel$"))
 
-    jq = app.job_queue
-
-    dca_h, dca_m = DCA_TIME_AEST
-    dca_utc = _aest_to_utc(dca_h, dca_m)
-    jq.run_daily(job_dca, time=dca_utc, name="dca_daily")
-    log.info("DCA 잡 등록: AEST %02d:%02d (UTC %s)", dca_h, dca_m, dca_utc)
-
-    for aest_h in MONITOR_HOURS_AEST:
-        utc_t = _aest_to_utc(aest_h)
-        jq.run_daily(job_monitor, time=utc_t, name=f"monitor_{aest_h:02d}aest")
-    log.info("모니터 잡 등록: AEST %s", ", ".join(f"{h:02d}:00" for h in MONITOR_HOURS_AEST))
+    register_jobs(app.job_queue)
 
     log.info("Lighter DCA Bot 시작 — polling...")
     app.run_polling(drop_pending_updates=True)

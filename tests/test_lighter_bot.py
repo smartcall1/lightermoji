@@ -254,3 +254,27 @@ def test_owner_filter_and_is_owner_only_pass_configured_chat():
     msg = lambda cid: Message(1, None, Chat(cid, "private"))
     assert lighter_bot.OWNER_FILTER.check_update(Update(1, message=msg(123456)))
     assert not lighter_bot.OWNER_FILTER.check_update(Update(2, message=msg(999)))
+
+
+def test_register_jobs_allows_late_runs_instead_of_skipping():
+    """11-05: 스케줄러가 늦게 깨도 DCA·모니터 잡을 건너뛰지 않도록 misfire_grace_time 을 넉넉히 준다."""
+    from lighter_bot import register_jobs, JOB_MISFIRE_GRACE_SEC
+    from lighter_bot import MONITOR_HOURS_AEST  # lighter_bot 이 실제로 쓰는 값(다른 시험이 config 를 다시 읽을 수 있음)
+    jq = MagicMock()
+    register_jobs(jq)
+    calls = jq.run_daily.call_args_list
+    assert len(calls) == 1 + len(MONITOR_HOURS_AEST)
+    assert JOB_MISFIRE_GRACE_SEC >= 600
+    for c in calls:
+        assert c.kwargs["job_kwargs"] == {"misfire_grace_time": JOB_MISFIRE_GRACE_SEC, "coalesce": True}
+    assert calls[0].kwargs["name"] == "dca_daily"
+
+
+def test_register_jobs_real_scheduler_keeps_grace():
+    """실제 PTB JobQueue 에 등록했을 때 APScheduler 잡에 grace 가 들어가는지(라이브러리 동작 확인)."""
+    from telegram.ext import Application
+    from lighter_bot import register_jobs, JOB_MISFIRE_GRACE_SEC
+    app = Application.builder().token("123:abc").build()
+    register_jobs(app.job_queue)
+    jobs = app.job_queue.scheduler.get_jobs()
+    assert jobs and all(j.misfire_grace_time == JOB_MISFIRE_GRACE_SEC and j.coalesce for j in jobs)
