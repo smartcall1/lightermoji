@@ -21,6 +21,10 @@ def _require_chat_id() -> str:
 TELEGRAM_CHAT_ID: str = _require_chat_id()
 
 LIGHTER_WALLET: str = os.environ["LIGHTER_WALLET"]
+# 4시간 알림 LP 칸에만 쓰는 두 번째 지갑(공개 주소, 읽기 전용 조회)
+LIGHTER_WALLET2: str = os.getenv(
+    "LIGHTER_WALLET2", "0x43ceaa361bab42FF5a46Cb2cb3E2d90E95ddB6Bb"
+).strip()
 LIGHTER_ACCOUNT_INDEX: int | None = (
     int(os.environ["LIGHTER_ACCOUNT_INDEX"])
     if os.environ.get("LIGHTER_ACCOUNT_INDEX", "").strip()

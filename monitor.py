@@ -1,9 +1,12 @@
 """Lighter 포지션 조회 및 포맷 — REST 읽기 전용 (인증 불필요)"""
 
 import inspect
+import logging
 import httpx
 from datetime import datetime, timezone, timedelta
-from config import API_BASE, LIGHTER_WALLET, AEST_OFFSET, HEADERS
+from config import API_BASE, LIGHTER_WALLET, LIGHTER_WALLET2, AEST_OFFSET, HEADERS
+
+logger = logging.getLogger(__name__)
 
 AEST = timezone(timedelta(hours=AEST_OFFSET))
 # 8시간 펀딩 주기 * 연간 365일 = 1095 periods/year
@@ -31,11 +34,13 @@ def unit_for(symbol: str) -> str:
     return "주" if symbol in SYMBOL_NAMES else "개"
 
 
-async def fetch_account(client: httpx.AsyncClient | None = None) -> dict | None:
+async def fetch_account(client: httpx.AsyncClient | None = None, wallet: str | None = None) -> dict | None:
+    wallet = wallet or LIGHTER_WALLET
+
     async def _fetch(c: httpx.AsyncClient) -> dict | None:
         r = await c.get(
             f"{API_BASE}/account",
-            params={"by": "l1_address", "value": LIGHTER_WALLET},
+            params={"by": "l1_address", "value": wallet},
             headers=HEADERS,
             timeout=15,
         )
@@ -236,27 +241,79 @@ def format_position_message(account: dict, positions: list[dict], funding_rates:
     lines.append(f"💰 Available {_fmt_usd(balance)} | Total {_fmt_usd(total_value)}")
 
     pool_details = account.get("_pool_details", [])
-    if pool_details:
+    # 지갑2: 리스트(비면 생략) / None 이면 조회 안 함 / _wallet2_failed 면 '조회 실패' 한 줄
+    pool_details2 = account.get("_pool_details2") or []
+    wallet2_failed = bool(account.get("_wallet2_failed"))
+    grouped = bool(pool_details2) or wallet2_failed
+    if pool_details or pool_details2:
         lines.append("─────────────────")
-        total_equity = sum(p["equity"] for p in pool_details)
-        total_lp_pnl = sum(p["lp_pnl"] for p in pool_details)
+        all_pools = list(pool_details) + list(pool_details2)
+        total_equity = sum(p["equity"] for p in all_pools)
+        total_lp_pnl = sum(p["lp_pnl"] for p in all_pools)
         lp_e = "🟢" if total_lp_pnl >= 0 else "🔴"
         total_lp_pnl_str = _fmt_usd(total_lp_pnl, is_diff=True)
         lines.append(f"🏦 LP {_fmt_usd(total_equity)} ({lp_e}{total_lp_pnl_str})")
-        for pd in pool_details:
-            apy_str = f" {_fmt_num(pd['apy'], sign=True)}%" if pd.get("apy") is not None else ""
-            pnl_val = pd["lp_pnl"]
-            pnl_str = f" ({_fmt_usd(pnl_val, is_diff=True)})" if pnl_val != 0 else ""
-            name = (
-                pd["name"]
-                .replace("Lighter Liquidity Provider (LLP)", "LLP")
-                .replace("Edge & Hedge (L/S Factors)", "Edge&Hedge")
-                .replace("$LIT Staking", "LIT Staking")
-            )
-            lit_tag = pd.get("lit_tag", "")
-            lines.append(f"  {name} {_fmt_usd(pd['equity'])}{pnl_str}{apy_str}{lit_tag}")
+        for label, group in (("Wallet1", pool_details), ("Wallet2", pool_details2)):
+            if grouped and group:
+                lines.append(label)
+            for pd in group:
+                lines.append(_fmt_pool_line(pd))
+        if wallet2_failed and not pool_details2:
+            lines.append("Wallet2 조회 실패")
+    elif wallet2_failed:
+        lines.append("─────────────────")
+        lines.append("Wallet2 조회 실패")
 
     return "\n".join(lines)
+
+
+def _fmt_pool_line(pd: dict) -> str:
+    apy_str = f" {_fmt_num(pd['apy'], sign=True)}%" if pd.get("apy") is not None else ""
+    pnl_val = pd["lp_pnl"]
+    pnl_str = f" ({_fmt_usd(pnl_val, is_diff=True)})" if pnl_val != 0 else ""
+    name = (
+        pd["name"]
+        .replace("Lighter Liquidity Provider (LLP)", "LLP")
+        .replace("Edge & Hedge (L/S Factors)", "Edge&Hedge")
+        .replace("$LIT Staking", "LIT Staking")
+    )
+    lit_tag = pd.get("lit_tag", "")
+    return f"  {name} {_fmt_usd(pd['equity'])}{pnl_str}{apy_str}{lit_tag}"
+
+
+async def build_pool_details(client: httpx.AsyncClient, account: dict, lit_price: float | None) -> list[dict]:
+    """계정 shares → LP 풀별 평가액(equity)·손익 목록 (원금 큰 순)."""
+    pool_details = []
+    for s in account.get("shares", []):
+        principal = float(s.get("principal_amount", "0"))
+        if principal == 0:
+            continue
+        pool_idx = s.get("public_pool_index", 0)
+        my_shares = int(s.get("shares_amount", 0))
+        entry_usdc = s.get("entry_usdc", "0")
+        meta = await fetch_pool_meta(client, pool_idx)
+        name = (meta.get("name") or "$LIT Staking") if meta else "$LIT Staking"
+        apy = float(meta["annual_percentage_yield"]) if meta and meta.get("annual_percentage_yield") else None
+        # Lighter API의 total_asset_value가 total_perps_value만 반영하고
+        # total_spot_value(XAUT/rhSPY 등 실물 보유분)를 누락하는 경우가 있어 직접 합산
+        tav_perps = float(meta.get("total_perps_value", "0") or 0) if meta else 0
+        tav_spot = float(meta.get("total_spot_value", "0") or 0) if meta else 0
+        tav = (tav_perps + tav_spot) if (tav_perps or tav_spot) else (
+            float(meta["total_asset_value"]) if meta and meta.get("total_asset_value") else 0
+        )
+        total_shares = int(meta.get("total_shares", 0)) if meta else 0
+        is_lit = entry_usdc == "0" and not meta
+        equity = (principal * lit_price) if (is_lit and lit_price) else (
+            (my_shares / total_shares) * tav if total_shares else principal
+        )
+        pool_details.append({
+            "name": name,
+            "principal": principal,
+            "equity": equity,
+            "lp_pnl": equity - principal,
+            "apy": apy,
+        })
+    return sorted(pool_details, key=lambda x: x["principal"], reverse=True)
 
 
 async def get_full_status() -> str:
@@ -268,37 +325,17 @@ async def get_full_status() -> str:
 
         lit_price = await fetch_lit_price(client)
         funding_rates = await _fetch_funding_rates()
-        pool_details = []
-        for s in account.get("shares", []):
-            principal = float(s.get("principal_amount", "0"))
-            if principal == 0:
-                continue
-            pool_idx = s.get("public_pool_index", 0)
-            my_shares = int(s.get("shares_amount", 0))
-            entry_usdc = s.get("entry_usdc", "0")
-            meta = await fetch_pool_meta(client, pool_idx)
-            name = (meta.get("name") or "$LIT Staking") if meta else "$LIT Staking"
-            apy = float(meta["annual_percentage_yield"]) if meta and meta.get("annual_percentage_yield") else None
-            # Lighter API의 total_asset_value가 total_perps_value만 반영하고
-            # total_spot_value(XAUT/rhSPY 등 실물 보유분)를 누락하는 경우가 있어 직접 합산
-            tav_perps = float(meta.get("total_perps_value", "0") or 0) if meta else 0
-            tav_spot = float(meta.get("total_spot_value", "0") or 0) if meta else 0
-            tav = (tav_perps + tav_spot) if (tav_perps or tav_spot) else (
-                float(meta["total_asset_value"]) if meta and meta.get("total_asset_value") else 0
-            )
-            total_shares = int(meta.get("total_shares", 0)) if meta else 0
-            is_lit = entry_usdc == "0" and not meta
-            equity = (principal * lit_price) if (is_lit and lit_price) else (
-                (my_shares / total_shares) * tav if total_shares else principal
-            )
-            pool_details.append({
-                "name": name,
-                "principal": principal,
-                "equity": equity,
-                "lp_pnl": equity - principal,
-                "apy": apy,
-            })
-
-        account["_pool_details"] = sorted(pool_details, key=lambda x: x["principal"], reverse=True)
+        account["_pool_details"] = await build_pool_details(client, account, lit_price)
+        if LIGHTER_WALLET2 and LIGHTER_WALLET2.lower() != LIGHTER_WALLET.lower():
+            # 지갑2는 LP 칸 전용. 실패해도 알림 전체는 그대로 나간다.
+            try:
+                account2 = await fetch_account(client, wallet=LIGHTER_WALLET2)
+                if account2 is None:
+                    account["_wallet2_failed"] = True
+                else:
+                    account["_pool_details2"] = await build_pool_details(client, account2, lit_price)
+            except Exception as e:
+                logger.warning("Wallet2 조회 실패: %s", e)
+                account["_wallet2_failed"] = True
         positions = parse_positions(account)
         return format_position_message(account, positions, funding_rates)

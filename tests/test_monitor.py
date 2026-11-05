@@ -147,3 +147,75 @@ def test_format_message_funding_two_lines():
     assert "💸 Funding +$1.50" in msg_with_rate
     assert "%APR) ⏰" in msg_with_rate
 
+
+
+# ---- 지갑2 LP 묶음 ----
+import asyncio
+import monitor
+
+_W1 = [
+    {"name": "Lighter Liquidity Provider (LLP)", "principal": 1000.0, "equity": 1100.0, "lp_pnl": 100.0, "apy": 10.0},
+    {"name": "$LIT Staking", "principal": 500.0, "equity": 450.0, "lp_pnl": -50.0, "apy": None},
+]
+_W2 = [{"name": "Lighter Liquidity Provider (LLP)", "principal": 200.0, "equity": 230.0, "lp_pnl": 30.0, "apy": 9.0}]
+
+
+def _msg(**extra):
+    acct = {**SAMPLE_ACCOUNT, "positions": [], "_pool_details": _W1, **extra}
+    return format_position_message(acct, [], {})
+
+
+def test_lp_two_wallets_grouped_and_summed():
+    msg = _msg(_pool_details2=_W2)
+    assert "🏦 LP $1,780 (🟢+$80)" in msg  # 1100+450+230, 100-50+30
+    i1, i2 = msg.index("Wallet1"), msg.index("Wallet2")
+    assert i1 < msg.index("LLP $1,100") < i2 < msg.index("LLP $230")
+    assert "Available $1,000.50 | Total $5,000" in msg
+
+
+def test_lp_wallet2_failed_one_line_rest_intact():
+    msg = _msg(_wallet2_failed=True)
+    assert "🏦 LP $1,550 (🟢+$50)" in msg
+    assert "Wallet1" in msg and "Wallet2 조회 실패" in msg
+    assert "LLP $1,100" in msg and "Available" in msg
+
+
+def test_lp_wallet2_empty_omitted():
+    msg = _msg(_pool_details2=[])
+    assert "Wallet1" not in msg and "Wallet2" not in msg
+    assert "🏦 LP $1,550" in msg
+
+
+def _run_status(monkeypatch, acct2):
+    async def fake_account(client=None, wallet=None):
+        if wallet == "0xW2":
+            if isinstance(acct2, Exception):
+                raise acct2
+            return acct2
+        return {**SAMPLE_ACCOUNT, "positions": [], "shares": [{"principal_amount": "1"}]}
+
+    async def fake_build(client, account, lit):
+        return _W2 if account is acct2 else _W1
+
+    async def none_async(*a, **k):
+        return None
+
+    async def empty_async(*a, **k):
+        return {}
+
+    monkeypatch.setattr(monitor, "LIGHTER_WALLET2", "0xW2")
+    monkeypatch.setattr(monitor, "fetch_account", fake_account)
+    monkeypatch.setattr(monitor, "build_pool_details", fake_build)
+    monkeypatch.setattr(monitor, "fetch_lit_price", none_async)
+    monkeypatch.setattr(monitor, "_fetch_funding_rates", empty_async)
+    return asyncio.run(monitor.get_full_status())
+
+
+def test_get_full_status_wallet2_ok(monkeypatch):
+    msg = _run_status(monkeypatch, {"shares": [1]})
+    assert "Wallet2" in msg and "LLP $230" in msg
+
+
+def test_get_full_status_wallet2_exception_and_missing(monkeypatch):
+    assert "Wallet2 조회 실패" in _run_status(monkeypatch, RuntimeError("boom"))
+    assert "Wallet2 조회 실패" in _run_status(monkeypatch, None)
