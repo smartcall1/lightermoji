@@ -4,7 +4,7 @@ import inspect
 import logging
 import httpx
 from datetime import datetime, timezone, timedelta
-from config import API_BASE, LIGHTER_WALLET, LIGHTER_WALLET2, AEST_OFFSET, HEADERS
+from config import API_BASE, LIGHTER_WALLET, LIGHTER_WALLET2, LIGHTER_WALLET2_LIT_ENTRY, AEST_OFFSET, HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -281,8 +281,13 @@ def _fmt_pool_line(pd: dict) -> str:
     return f"  {name} {_fmt_usd(pd['equity'])}{pnl_str}{apy_str}{lit_tag}"
 
 
-async def build_pool_details(client: httpx.AsyncClient, account: dict, lit_price: float | None) -> list[dict]:
-    """계정 shares → LP 풀별 평가액(equity)·손익 목록 (원금 큰 순)."""
+async def build_pool_details(
+    client: httpx.AsyncClient, account: dict, lit_price: float | None, lit_entry: float = 1.0
+) -> list[dict]:
+    """계정 shares → LP 풀별 평가액(equity)·손익 목록 (원금 큰 순).
+
+    LIT Staking 은 principal 이 LIT 개수라 원가 = 개수 × lit_entry(지갑별 평단, 기본 1.0 = 기존 표시).
+    """
     pool_details = []
     for s in account.get("shares", []):
         principal = float(s.get("principal_amount", "0"))
@@ -306,11 +311,12 @@ async def build_pool_details(client: httpx.AsyncClient, account: dict, lit_price
         equity = (principal * lit_price) if (is_lit and lit_price) else (
             (my_shares / total_shares) * tav if total_shares else principal
         )
+        cost = principal * lit_entry if (is_lit and lit_price) else principal
         pool_details.append({
             "name": name,
             "principal": principal,
             "equity": equity,
-            "lp_pnl": equity - principal,
+            "lp_pnl": equity - cost,
             "apy": apy,
         })
     return sorted(pool_details, key=lambda x: x["principal"], reverse=True)
@@ -333,7 +339,9 @@ async def get_full_status() -> str:
                 if account2 is None:
                     account["_wallet2_failed"] = True
                 else:
-                    account["_pool_details2"] = await build_pool_details(client, account2, lit_price)
+                    account["_pool_details2"] = await build_pool_details(
+                        client, account2, lit_price, lit_entry=LIGHTER_WALLET2_LIT_ENTRY
+                    )
             except Exception as e:
                 logger.warning("Wallet2 조회 실패: %s", e)
                 account["_wallet2_failed"] = True

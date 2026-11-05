@@ -25,6 +25,8 @@ LIGHTER_WALLET: str = os.environ["LIGHTER_WALLET"]
 LIGHTER_WALLET2: str = os.getenv(
     "LIGHTER_WALLET2", "0x43ceaa361bab42FF5a46Cb2cb3E2d90E95ddB6Bb"
 ).strip()
+# 지갑2 LIT Staking 평단(USD/LIT) — 손익 = 평가액 - 개수×평단 (싸장님 11-05: $3.0)
+LIGHTER_WALLET2_LIT_ENTRY: float = float(os.getenv("LIGHTER_WALLET2_LIT_ENTRY", "3.0"))
 LIGHTER_ACCOUNT_INDEX: int | None = (
     int(os.environ["LIGHTER_ACCOUNT_INDEX"])
     if os.environ.get("LIGHTER_ACCOUNT_INDEX", "").strip()

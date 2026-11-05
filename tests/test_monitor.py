@@ -194,7 +194,7 @@ def _run_status(monkeypatch, acct2):
             return acct2
         return {**SAMPLE_ACCOUNT, "positions": [], "shares": [{"principal_amount": "1"}]}
 
-    async def fake_build(client, account, lit):
+    async def fake_build(client, account, lit, lit_entry=1.0):
         return _W2 if account is acct2 else _W1
 
     async def none_async(*a, **k):
@@ -219,3 +219,43 @@ def test_get_full_status_wallet2_ok(monkeypatch):
 def test_get_full_status_wallet2_exception_and_missing(monkeypatch):
     assert "Wallet2 조회 실패" in _run_status(monkeypatch, RuntimeError("boom"))
     assert "Wallet2 조회 실패" in _run_status(monkeypatch, None)
+
+
+def test_build_pool_details_lit_entry(monkeypatch):
+    """LIT Staking 손익 = 개수×가격 - 개수×평단. 기본 평단 1.0 은 기존 표시와 같다."""
+    async def no_meta(client, idx):
+        return None
+
+    monkeypatch.setattr(monitor, "fetch_pool_meta", no_meta)
+    acct = {"shares": [{"principal_amount": "5000", "entry_usdc": "0", "public_pool_index": 9}]}
+    w1 = asyncio.run(monitor.build_pool_details(None, acct, 3.4))
+    w2 = asyncio.run(monitor.build_pool_details(None, acct, 3.4, lit_entry=3.0))
+    assert round(w1[0]["equity"], 2) == 17000.0
+    assert round(w1[0]["lp_pnl"], 2) == 12000.0
+    assert round(w2[0]["lp_pnl"], 2) == 2000.0
+
+
+def test_get_full_status_passes_wallet2_lit_entry(monkeypatch):
+    seen = {}
+
+    async def fake_account(client=None, wallet=None):
+        return {**SAMPLE_ACCOUNT, "positions": [], "shares": []}
+
+    async def fake_build(client, account, lit, lit_entry=1.0):
+        seen.setdefault("entries", []).append(lit_entry)
+        return []
+
+    async def none_async(*a, **k):
+        return None
+
+    async def empty_async(*a, **k):
+        return {}
+
+    monkeypatch.setattr(monitor, "LIGHTER_WALLET2", "0xW2")
+    monkeypatch.setattr(monitor, "LIGHTER_WALLET2_LIT_ENTRY", 3.0)
+    monkeypatch.setattr(monitor, "fetch_account", fake_account)
+    monkeypatch.setattr(monitor, "build_pool_details", fake_build)
+    monkeypatch.setattr(monitor, "fetch_lit_price", none_async)
+    monkeypatch.setattr(monitor, "_fetch_funding_rates", empty_async)
+    asyncio.run(monitor.get_full_status())
+    assert seen["entries"] == [1.0, 3.0]
