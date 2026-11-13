@@ -118,6 +118,27 @@ async def execute_dca(symbol: str, target_usdc: float) -> DCAResult:
         _active_symbols.discard(symbol)
 
 
+def is_symbol_busy(symbol: str) -> bool:
+    """같은 종목에 DCA·가드 주문이 진행 중인지(종목 잠금)."""
+    return symbol in _active_symbols
+
+
+async def execute_buynow(symbol: str, notional_usdc: float) -> DCAResult:
+    """수동 '물타기 지금': notional_usdc 는 명목가(증거금 x 레버리지). execute_dca 와 같은 종목 잠금을 쓴다.
+
+    청산가가 가까울 때 쓰는 기능이라 청산 근접 검사만 생략(guard=True), 잔고 하한 검사는 유지한다.
+    liq_guard 의 재발동 기록(state)은 건드리지 않는다.
+    """
+    if symbol in _active_symbols:
+        return DCAResult(symbol=symbol, filled_usdc=0, target_usdc=notional_usdc,
+                         filled_amount=0, avg_price=0, error="같은 종목 주문 진행 중 (가드 투입 중일 수 있음)")
+    _active_symbols.add(symbol)
+    try:
+        return await _execute_dca_inner(symbol, notional_usdc, guard=True, coi_base=_next_guard_coi_base())
+    finally:
+        _active_symbols.discard(symbol)
+
+
 async def _execute_dca_inner(
     symbol: str, target_usdc: float, *,
     guard: bool = False, max_retries: int | None = None, coi_base: int | None = None,
