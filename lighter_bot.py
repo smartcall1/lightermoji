@@ -2,14 +2,20 @@
 
 import asyncio
 import logging
+import math
 import os
+import re
+import secrets
 import sys
+import time as _time
 from datetime import time, timezone, timedelta
 
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TimedOut, NetworkError
 from telegram.request import HTTPXRequest
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters,
+)
 
 from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
@@ -19,7 +25,7 @@ from config import (
 import config
 import liq_guard
 import runtime_flags
-from monitor import get_full_status, fetch_account, parse_positions, SYMBOL_NAMES
+from monitor import get_full_status, fetch_account, parse_positions, fmt_price, SYMBOL_NAMES, unit_for
 
 GUARD_JOB_KWARGS = {"misfire_grace_time": 120, "coalesce": True, "max_instances": 1}
 _guard_job_interval: int | None = None
@@ -52,9 +58,10 @@ def register_jobs(jq):
     )
     global _guard_job_interval
     _guard_job_interval = config.LIQ_GUARD_INTERVAL_SEC
-from lighter_client import fetch_market_info, set_leverage, get_account_index
+from lighter_client import fetch_market_info, fetch_market_margin, set_leverage, get_account_index
 from dca_engine import (
     execute_dca, format_dca_notification, close_position, format_close_notification,
+    execute_buynow, is_symbol_busy,
 )
 
 logging.basicConfig(
@@ -129,6 +136,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"명령어:\n"
         f"  /l         — 포지션 현황 (종료 버튼 포함)\n"
         f"  /dca       — DCA 수동 실행 (확인 버튼)\n"
+        f"  /buynow    — 물타기 지금 (종목 선택 -> 금액 -> 확인)\n"
         f"  /config    — 현재 DCA 설정\n"
         f"  /addcoin <티커> <금액> [레버리지]   — DCA 종목 추가/수정\n"
         f"  /removecoin <티커>                — DCA 종목 제거\n"
@@ -401,6 +409,220 @@ async def cb_dca_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text("❌ <b>DCA 실행이 취소되었어요.</b>", parse_mode="HTML")
 
 
+# ── /buynow: 지금 바로 물타기 (금액 = 증거금 달러, 시장가 성격 매수 1회) ─────────────────
+BUYNOW_TTL_SEC = 120
+_BUYNOW_AMOUNT_RE = re.compile(r"^\d+(\.\d+)?$")
+_buynow: dict[int, dict] = {}  # chat_id -> {"stage": "amount"|"confirm", symbol, ts, [amount, token]}
+_buynow_now = _time.monotonic  # 시험에서 교체
+
+
+def parse_buynow_amount(text: str) -> float | None:
+    """'500', '12.5' 만 허용. 문자·0·음수·nan·inf·지수표기·밑줄은 None."""
+    t = (text or "").strip()
+    if not _BUYNOW_AMOUNT_RE.match(t):
+        return None
+    v = float(t)
+    return v if math.isfinite(v) and v > 0 else None
+
+
+def buynow_plan(pos: dict, margin_usd: float) -> dict:
+    """증거금 X 달러 -> 명목가 X*L, 수량 q = X*L / 지금가.
+
+    execute_dca 의 금액 인자는 명목가다: dca_engine._execute_dca_inner 에서
+    base_amount = remaining_usdc / limit_price (증거금이 아님). 그래서 X*L 을 넘긴다.
+    """
+    imf = float(pos.get("imf_raw") or 0)
+    lev = 100.0 / imf if imf > 0 else 1.0
+    price = float(pos.get("current") or 0)
+    notional = margin_usd * lev
+    return {"lev": lev, "price": price, "notional": notional, "qty": notional / price if price > 0 else 0.0}
+
+
+def _long_positions(account: dict | None) -> list[dict]:
+    return [p for p in (parse_positions(account) if account else []) if p.get("side") == "Long"]
+
+
+def _buynow_expired(st: dict) -> bool:
+    return _buynow_now() - st["ts"] > BUYNOW_TTL_SEC
+
+
+async def cmd_buynow(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_owner(update):
+        return
+    _buynow.pop(update.effective_chat.id, None)
+    try:
+        longs = _long_positions(await fetch_account())
+    except Exception as e:
+        log.exception("[BUYNOW] 포지션 조회 실패")
+        await update.message.reply_text(f"❌ 포지션 조회 실패: {e}")
+        return
+    if not longs:
+        await update.message.reply_text("열린 롱 없음")
+        return
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(f"💧 {p['name']} 물타기", callback_data=f"bn_pick:{p['symbol']}")] for p in longs]
+        + [[InlineKeyboardButton("취소", callback_data="bn_no")]]
+    )
+    await update.message.reply_text("어느 종목에 지금 바로 물타기(시장가 매수)할까요?", reply_markup=keyboard)
+
+
+async def cb_buynow_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("권한 없음", show_alert=True)
+        return
+    await query.answer()
+    symbol = query.data.split(":", 1)[1]
+    _buynow[update.effective_chat.id] = {"stage": "amount", "symbol": symbol, "ts": _buynow_now()}
+    name = SYMBOL_NAMES.get(symbol, symbol.replace("USD", ""))
+    await query.edit_message_text(
+        f"{name} — 금액을 숫자로 보내줘(증거금 기준 달러, 예: 500)\n2분 안에 안 보내면 취소돼요.")
+
+
+async def _buynow_expected_liq(symbol: str, pos: dict, margin_usd: float) -> float | None:
+    """isolated 이고 계산 가능할 때만 예상 새 청산가(liq_guard 계산 함수 재사용). 아니면 None(줄 생략)."""
+    if pos.get("margin_mode") != 1:
+        return None
+    try:
+        market = await fetch_market_info(symbol)
+        mm = await fetch_market_margin(market["market_id"])
+        lv = liq_guard.compute_levels(pos, mm)
+        if lv is None:
+            return None
+        return liq_guard.post_levels(lv, 0.0, margin_usd)["p_part"]
+    except Exception as e:
+        log.warning("[BUYNOW] 예상 청산가 계산 생략: %r", e)
+        return None
+
+
+async def on_buynow_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """금액 입력 대기 중일 때만 반응하는 텍스트 핸들러(그 외 일반 메시지는 무시)."""
+    if not _is_owner(update) or update.message is None:
+        return
+    chat_id = update.effective_chat.id
+    st = _buynow.get(chat_id)
+    if not st or st.get("stage") != "amount":
+        return
+    _buynow.pop(chat_id, None)  # 숫자 메시지 1개만 받는다 — 결과와 상관없이 다시 묻지 않음
+    if _buynow_expired(st):
+        await update.message.reply_text("시간이 지나 취소됐어요. 다시 /buynow")
+        return
+    amount = parse_buynow_amount(update.message.text)
+    if amount is None:
+        await update.message.reply_text("⚠️ 0보다 큰 숫자가 아니라서 취소했어요. 다시 /buynow")
+        return
+    symbol = st["symbol"]
+    name = SYMBOL_NAMES.get(symbol, symbol.replace("USD", ""))
+    try:
+        account = await fetch_account()
+        pos = next((p for p in _long_positions(account) if p["symbol"] == symbol), None)
+    except Exception as e:
+        log.exception("[BUYNOW] 확인 화면용 조회 실패")
+        await update.message.reply_text(f"❌ 조회 실패: {e}")
+        return
+    if pos is None:
+        await update.message.reply_text(f"{name} 롱 포지션이 없어서 취소했어요.")
+        return
+    plan = buynow_plan(pos, amount)
+    if plan["price"] <= 0:
+        await update.message.reply_text("❌ 지금가를 알 수 없어 취소했어요.")
+        return
+    avail = float((account or {}).get("available_balance", "0") or 0)
+    lines = [
+        f"⚠️ [물타기 지금 확인] {name}",
+        f"지금가 {fmt_price(plan['price'])}",
+        f"증거금 ${amount:,.2f} x 레버리지 {plan['lev']:.1f}배 -> 약 ${plan['notional']:,.0f} 어치 "
+        f"(수량 약 {plan['qty']:.4f}{unit_for(symbol)}) 시장가 매수",
+    ]
+    new_liq = await _buynow_expected_liq(symbol, pos, amount)
+    if new_liq:
+        lines.append(f"청산가 {fmt_price(pos['liq'])} -> 예상 {fmt_price(new_liq)}")
+    lines.append(f"가용 잔고 ${avail:,.2f} (실행 후 ${avail - amount:,.2f}, 하한 ${config.MIN_AVAILABLE_BALANCE:,.0f})")
+    if avail - amount < config.MIN_AVAILABLE_BALANCE:
+        lines.append("❌ 잔고 하한 아래라 실행할 수 없어요.")
+        await update.message.reply_text("\n".join(lines))
+        return
+    token = secrets.token_hex(4)
+    _buynow[chat_id] = {"stage": "confirm", "symbol": symbol, "amount": amount, "token": token,
+                        "ts": _buynow_now()}
+    lines.append("2분 안에 눌러주세요.")
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ 실행", callback_data=f"bn_go:{token}"),
+        InlineKeyboardButton("취소", callback_data="bn_no"),
+    ]])
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
+
+
+async def _run_buynow(symbol: str, amount: float) -> str:
+    name = SYMBOL_NAMES.get(symbol, symbol.replace("USD", ""))
+    if is_symbol_busy(symbol):
+        log.info("[BUYNOW] %s 거부 - 진행 중 주문(가드 투입 중)", symbol)
+        return f"가드 투입 중 — {name} 주문이 진행 중이라 실행하지 않았어요. 잠시 뒤 다시 /buynow"
+    try:
+        account = await fetch_account()
+        pos = next((p for p in _long_positions(account) if p["symbol"] == symbol), None)
+    except Exception as e:
+        log.exception("[BUYNOW] 실행 직전 조회 실패")
+        return f"❌ 실행 직전 조회 실패 — 주문 안 냄: {e}"
+    if pos is None:
+        return f"{name} 롱 포지션이 없어 실행하지 않았어요."
+    avail = float((account or {}).get("available_balance", "0") or 0)
+    if avail - amount < config.MIN_AVAILABLE_BALANCE:
+        log.info("[BUYNOW] %s 거부 - 가용 %.2f - %.2f < 하한", symbol, avail, amount)
+        return (f"실행 안 함 — 가용 ${avail:,.2f} - 증거금 ${amount:,.2f} 이 "
+                f"하한 ${config.MIN_AVAILABLE_BALANCE:,.0f} 아래예요.")
+    plan = buynow_plan(pos, amount)
+    if plan["price"] <= 0:
+        return "❌ 지금가를 알 수 없어 실행하지 않았어요."
+    log.info("[BUYNOW] %s 증거금=$%.2f lev=%.2f 명목=$%.2f 시작", symbol, amount, plan["lev"], plan["notional"])
+    try:
+        result = await execute_buynow(symbol, plan["notional"])
+    except Exception as e:
+        log.exception("[BUYNOW] %s 실행 예외", symbol)
+        return f"❌ 물타기 실패 — {name}\n{e}"
+    log.info("[BUYNOW] %s 결과 체결=$%.2f 수량=%.6f 평균=%.6f 오류=%s skip=%s",
+             symbol, result.filled_usdc, result.filled_amount, result.avg_price, result.error, result.skipped)
+    return format_dca_notification(result)
+
+
+async def cb_buynow_go(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("권한 없음", show_alert=True)
+        return
+    chat_id = update.effective_chat.id
+    token = query.data.split(":", 1)[1]
+    st = _buynow.get(chat_id)
+    # 확인 상태를 await 이전에 꺼낸다: 같은 버튼을 두 번 눌러도 주문은 1번
+    if st and st.get("stage") == "confirm" and st.get("token") == token:
+        _buynow.pop(chat_id, None)
+    else:
+        st = None
+    if st is None:
+        await query.answer("이미 처리됐거나 만료됐어요", show_alert=True)
+        return
+    await query.answer()
+    if _buynow_expired(st):
+        await query.edit_message_text("시간이 지나 취소됐어요. 다시 /buynow")
+        return
+    msg = await _run_buynow(st["symbol"], st["amount"])
+    try:
+        await query.edit_message_text(msg)
+    except Exception:
+        log.warning("[BUYNOW] 콜백 메시지 수정 실패, 일반 메시지로 전송")
+        await _send_safe_message(ctx.bot, chat_id=chat_id, text=msg)
+
+
+async def cb_buynow_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("권한 없음", show_alert=True)
+        return
+    await query.answer()
+    _buynow.pop(update.effective_chat.id, None)
+    await query.edit_message_text("취소됨")
+
+
 async def cmd_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     h, m = DCA_TIME_AEST
     lines = [
@@ -529,6 +751,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "봇 시작 및 도움말"),
         BotCommand("l", "Lighter 포지션 현황 조회"),
         BotCommand("dca", "DCA 수동 실행 (확인 단계 포함)"),
+        BotCommand("buynow", "물타기 지금 (시장가 매수)"),
         BotCommand("config", "DCA 설정 현황 조회"),
         BotCommand("addcoin", "DCA 종목 추가/수정 <티커> <금액> [레버리지]"),
         BotCommand("removecoin", "DCA 종목 제거 <티커>"),
@@ -568,6 +791,7 @@ def _run_bot_locked() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("l", cmd_lighter, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("dca", cmd_dca, filters=OWNER_FILTER))
+    app.add_handler(CommandHandler("buynow", cmd_buynow, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("config", cmd_config, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("addcoin", cmd_addcoin, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("removecoin", cmd_removecoin, filters=OWNER_FILTER))
@@ -581,6 +805,10 @@ def _run_bot_locked() -> None:
     app.add_handler(CallbackQueryHandler(cb_close_no, pattern=r"^close_no$"))
     app.add_handler(CallbackQueryHandler(cb_dca_confirm, pattern=r"^dca_confirm$"))
     app.add_handler(CallbackQueryHandler(cb_dca_cancel, pattern=r"^dca_cancel$"))
+    app.add_handler(CallbackQueryHandler(cb_buynow_pick, pattern=r"^bn_pick:"))
+    app.add_handler(CallbackQueryHandler(cb_buynow_go, pattern=r"^bn_go:"))
+    app.add_handler(CallbackQueryHandler(cb_buynow_no, pattern=r"^bn_no$"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, on_buynow_text))
 
     register_jobs(app.job_queue)
 
