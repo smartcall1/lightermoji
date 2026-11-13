@@ -13,7 +13,7 @@ from lighter_client import (
 )
 from config import (
     MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE,
-    ORDER_RETRY_INTERVAL_SEC, ORDER_PRICE_STEP_PCT, ORDER_MAX_RETRIES,
+    ORDER_RETRY_INTERVAL_SEC, ORDER_PRICE_STEP_PCT, ORDER_MAX_RETRIES, ORDER_FIRST_PREMIUM_PCT,
     CLOSE_SLIPPAGE_PCT, CANCEL_VERIFY_ATTEMPTS, CANCEL_VERIFY_INTERVAL_SEC,
     SETTLE_ATTEMPTS, SETTLE_RETRY_SEC,
 )
@@ -59,8 +59,8 @@ def _check_safety(
     return None
 
 
-def _calc_order_price(base_price: float, retry: int, step_pct: float) -> float:
-    return base_price * (1 + retry * step_pct / 100)
+def _calc_order_price(base_price: float, retry: int, step_pct: float, premium_pct: float = 0.0) -> float:
+    return base_price * (1 + (premium_pct + retry * step_pct) / 100)
 
 
 def _find_position(account: dict, symbol: str) -> dict | None:
@@ -185,7 +185,7 @@ async def _execute_dca_inner(
         )
 
     for retry in range(max_retries if max_retries is not None else ORDER_MAX_RETRIES):
-        limit_price = _calc_order_price(base_price, retry, ORDER_PRICE_STEP_PCT)
+        limit_price = _calc_order_price(base_price, retry, ORDER_PRICE_STEP_PCT, ORDER_FIRST_PREMIUM_PCT)
         base_amount = remaining_usdc / limit_price
 
         if base_amount < market["min_base_amount"]:
@@ -454,16 +454,16 @@ def format_close_notification(result: CloseResult) -> str:
     return "\n".join(lines)
 
 
-def format_dca_notification(result: DCAResult) -> str:
+def format_dca_notification(result: DCAResult, title: str = "DCA") -> str:
     name = SYMBOL_NAMES.get(result.symbol, result.symbol.replace("USD", ""))
     unit = unit_for(result.symbol)
 
     if result.error:
-        return f"❌ DCA 오류 — {name}\n{result.error}"
+        return f"❌ {title} 오류 — {name}\n{result.error}"
 
     if result.skipped:
         reason = result.skip_reason.value if result.skip_reason else "알 수 없음"
-        lines = [f"⚠️ DCA 스킵 — {name}", f"이유: {reason}"]
+        lines = [f"⚠️ {title} 스킵 — {name}", f"이유: {reason}"]
         p = result.position_after
         if p:
             liq_dist_str = "여유충분" if p['liq_dist'] >= 999 else f"{p['liq_dist']:.1f}% 여유"
@@ -472,7 +472,7 @@ def format_dca_notification(result: DCAResult) -> str:
 
     p = result.position_after
     lines = [
-        f"✅ DCA 완료 — {name}",
+        f"✅ {title} 완료 — {name}",
         "─────────────────",
         f"💰 매수: ${result.filled_usdc:.2f} → {result.filled_amount:.4f}{unit} @ {fmt_price(result.avg_price)}",
     ]

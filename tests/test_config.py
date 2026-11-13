@@ -37,6 +37,7 @@ def test_dca_config_parsing():
     assert cfg.ORDER_RETRY_INTERVAL_SEC == 30
     assert cfg.ORDER_PRICE_STEP_PCT == 0.05
     assert cfg.ORDER_MAX_RETRIES == 20
+    assert cfg.ORDER_FIRST_PREMIUM_PCT == 0.1  # env 미지정 기본값
 
 
 def test_dca_config_no_markets():
