@@ -77,6 +77,29 @@ CANCEL_VERIFY_INTERVAL_SEC: float = float(os.getenv("CANCEL_VERIFY_INTERVAL_SEC"
 SETTLE_ATTEMPTS: int = max(1, int(os.getenv("SETTLE_ATTEMPTS", "3")))
 SETTLE_RETRY_SEC: float = float(os.getenv("SETTLE_RETRY_SEC", "5"))
 
+# ── 청산 전 방어 투입(Liq Guard) / 정기 DCA 스위치 ─────────────────────────
+# 키 이름에 DCA_ 접두를 쓰면 _parse_dca_markets 가 종목으로 오인하므로 쓰지 않는다.
+# 런타임 스위치(정기 DCA 켜짐/꺼짐, guard 모드)는 data/runtime_flags.json 이 이 기본값을 덮어쓴다.
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+REGULAR_DCA_ENABLED: bool = _env_bool("REGULAR_DCA_ENABLED", True)
+LIQ_GUARD_MODE: str = os.getenv("LIQ_GUARD_MODE", "off").strip().lower()  # off|shadow|live
+LIQ_GUARD_INTERVAL_SEC: int = int(os.getenv("LIQ_GUARD_INTERVAL_SEC", "60"))
+LIQ_GUARD_TRIGGER_PCT: float = float(os.getenv("LIQ_GUARD_TRIGGER_PCT", "2.0"))
+LIQ_GUARD_TARGET_PCT: float = float(os.getenv("LIQ_GUARD_TARGET_PCT", "4.0"))
+LIQ_GUARD_BUDGET_USD: float = float(os.getenv("LIQ_GUARD_BUDGET_USD", "100"))
+LIQ_GUARD_COLLATERAL_MIN_SHARE: float = float(os.getenv("LIQ_GUARD_COLLATERAL_MIN_SHARE", "0.5"))
+LIQ_GUARD_REARM_PCT: float = float(os.getenv("LIQ_GUARD_REARM_PCT", "1.0"))
+LIQ_GUARD_MAX_RETRIES: int = int(os.getenv("LIQ_GUARD_MAX_RETRIES", "5"))
+LIQ_GUARD_MMF_RATIO: float = float(os.getenv("LIQ_GUARD_MMF_RATIO", "0.6"))
+LIQ_GUARD_ALERT_COOLDOWN_SEC: int = int(os.getenv("LIQ_GUARD_ALERT_COOLDOWN_SEC", "600"))
+LIQ_GUARD_SHADOW_HOURLY_SEC: int = int(os.getenv("LIQ_GUARD_SHADOW_HOURLY_SEC", "3600"))
+
 BASE_URL: str = "https://mainnet.zklighter.elliot.ai"
 API_BASE: str = f"{BASE_URL}/api/v1"
 AEST_OFFSET: int = 10  # UTC+10

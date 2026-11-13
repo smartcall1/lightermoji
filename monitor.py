@@ -140,6 +140,11 @@ def parse_positions(account: dict) -> list[dict]:
         funding = float(p.get("total_funding_paid_out", "0") or "0")
         side = "Long" if p.get("sign", 1) == 1 else "Short"
         orders = int(p.get("open_order_count", 0))
+        # margin_mode: CROSS=0, ISOLATED=1. 필드가 없거나 이상하면 None(알 수 없음)
+        try:
+            margin_mode = int(p["margin_mode"])
+        except (KeyError, TypeError, ValueError):
+            margin_mode = None
 
         current = value / size if size else entry
         # 마진(투입 자본) 대비 손실률 — 청산 리스크를 체감하는 실질 지표
@@ -166,6 +171,9 @@ def parse_positions(account: dict) -> list[dict]:
             "leverage": leverage,
             "funding": funding,
             "orders": orders,
+            "margin_mode": margin_mode,
+            "sign": 1 if side == "Long" else -1,
+            "imf_raw": imf,  # initial_margin_fraction 원본(단위 확정용; 퍼센트로 추정)
         })
     return sorted(results, key=lambda x: abs(x["value"]), reverse=True)
 
