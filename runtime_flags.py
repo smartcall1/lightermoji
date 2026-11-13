@@ -81,3 +81,21 @@ def set_collateral_min_share(share: float) -> None:
     if isinstance(share, bool) or not (0 <= share <= 1):  # NaN 도 여기서 거부됨
         raise ValueError("share 는 0~1 사이여야 합니다")
     _save({"collateral_min_share": float(share)})
+
+
+INTERVAL_MIN, INTERVAL_MAX = 5, 300
+
+
+def guard_interval_sec() -> int:
+    """감시 간격(초). 파일 값이 5~300 이면 .env 기본값을 덮어쓴다."""
+    val = _load().get("guard_interval_sec")
+    if isinstance(val, (int, float)) and not isinstance(val, bool) and INTERVAL_MIN <= val <= INTERVAL_MAX:
+        return int(val)
+    d = int(config.LIQ_GUARD_INTERVAL_SEC)
+    return d if INTERVAL_MIN <= d <= INTERVAL_MAX else 15
+
+
+def set_guard_interval_sec(sec) -> None:
+    if isinstance(sec, bool) or not (INTERVAL_MIN <= sec <= INTERVAL_MAX):
+        raise ValueError(f"간격은 {INTERVAL_MIN}~{INTERVAL_MAX}초여야 합니다")
+    _save({"guard_interval_sec": int(sec)})

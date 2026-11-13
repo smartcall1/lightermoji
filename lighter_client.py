@@ -107,6 +107,7 @@ async def fetch_market_margin(market_id: int) -> dict | None:
                 return {
                     "maintenance_margin_fraction": d.get("maintenance_margin_fraction"),
                     "min_initial_margin_fraction": d.get("min_initial_margin_fraction"),
+                    "default_initial_margin_fraction": d.get("default_initial_margin_fraction"),
                 }
         except Exception as e:
             log.warning("시장 증거금 비율 조회 실패: %s", e)

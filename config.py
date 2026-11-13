@@ -89,14 +89,18 @@ def _env_bool(name: str, default: bool) -> bool:
 
 REGULAR_DCA_ENABLED: bool = _env_bool("REGULAR_DCA_ENABLED", True)
 LIQ_GUARD_MODE: str = os.getenv("LIQ_GUARD_MODE", "off").strip().lower()  # off|shadow|live
-LIQ_GUARD_INTERVAL_SEC: int = int(os.getenv("LIQ_GUARD_INTERVAL_SEC", "60"))
+LIQ_GUARD_INTERVAL_SEC: int = int(os.getenv("LIQ_GUARD_INTERVAL_SEC", "15"))  # runtime_flags guard_interval_sec 가 우선(5~300)
 LIQ_GUARD_TRIGGER_PCT: float = float(os.getenv("LIQ_GUARD_TRIGGER_PCT", "2.0"))
 LIQ_GUARD_TARGET_PCT: float = float(os.getenv("LIQ_GUARD_TARGET_PCT", "4.0"))
 LIQ_GUARD_BUDGET_USD: float = float(os.getenv("LIQ_GUARD_BUDGET_USD", "100"))
 LIQ_GUARD_COLLATERAL_MIN_SHARE: float = float(os.getenv("LIQ_GUARD_COLLATERAL_MIN_SHARE", "0.5"))
 LIQ_GUARD_REARM_PCT: float = float(os.getenv("LIQ_GUARD_REARM_PCT", "1.0"))
 LIQ_GUARD_MAX_RETRIES: int = int(os.getenv("LIQ_GUARD_MAX_RETRIES", "5"))
-LIQ_GUARD_MMF_RATIO: float = float(os.getenv("LIQ_GUARD_MMF_RATIO", "0.6"))
+# 차단선 IMF 출처: conservative = max(min, default) 초기증거금 비율 / min = min 만
+# 담보/매수 분할: fixed = 담보 B*share + 매수 B*(1-share) 고정 / target = 목표 차단선 공식으로 매수를 줄임
+LIQ_GUARD_SPLIT: str = os.getenv("LIQ_GUARD_SPLIT", "fixed").strip().lower()
+LIQ_GUARD_MARKET_CACHE_SEC: int = int(os.getenv("LIQ_GUARD_MARKET_CACHE_SEC", "3600"))
+LIQ_GUARD_BLOCK_IMF_SOURCE: str = os.getenv("LIQ_GUARD_BLOCK_IMF_SOURCE", "conservative").strip().lower()
 LIQ_GUARD_ALERT_COOLDOWN_SEC: int = int(os.getenv("LIQ_GUARD_ALERT_COOLDOWN_SEC", "600"))
 LIQ_GUARD_SHADOW_HOURLY_SEC: int = int(os.getenv("LIQ_GUARD_SHADOW_HOURLY_SEC", "3600"))
 

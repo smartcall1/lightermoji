@@ -16,8 +16,13 @@ from config import (
     DCA_MARKETS, DCA_TIME_AEST, MONITOR_HOURS_AEST, AEST_OFFSET,
     add_dca_market, remove_dca_market,
 )
+import config
+import liq_guard
+import runtime_flags
 from monitor import get_full_status, fetch_account, parse_positions, SYMBOL_NAMES
 
+GUARD_JOB_KWARGS = {"misfire_grace_time": 120, "coalesce": True, "max_instances": 1}
+_guard_job_interval: int | None = None
 JOB_MISFIRE_GRACE_SEC = 1800  # 스케줄 잡이 이만큼 늦게 깨도 건너뛰지 않고 실행(11-05)
 
 
@@ -43,11 +48,10 @@ def register_jobs(jq):
     # 방어 투입: 모드(off|shadow|live)는 data/runtime_flags.json 에서 매 실행 시점에 읽는다(off 면 즉시 반환).
     jq.run_repeating(
         job_liq_guard, interval=config.LIQ_GUARD_INTERVAL_SEC, first=30, name="liq_guard",
-        job_kwargs={"misfire_grace_time": 120, "coalesce": True, "max_instances": 1},
+        job_kwargs=GUARD_JOB_KWARGS,
     )
-import runtime_flags
-import liq_guard
-import config
+    global _guard_job_interval
+    _guard_job_interval = config.LIQ_GUARD_INTERVAL_SEC
 from lighter_client import fetch_market_info, set_leverage, get_account_index
 from dca_engine import (
     execute_dca, format_dca_notification, close_position, format_close_notification,
@@ -131,7 +135,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"  /leverage <티커> <배수>            — 레버리지만 변경\n"
         f"  /dcaoff, /dcaon                   — 정기 DCA 끄기/켜기\n"
         f"  /guard off|shadow|live            — 청산 방어 투입 모드\n"
-        f"  /guard share <0~1>                — 담보 최소 비중\n"
+        f"  /guard share <0~1>                — 담보 비중\n"
+        f"  /guard interval <초>              — 감시 간격(5~300)\n"
         f"  /guardstatus                      — 방어 투입 현황"
     )
 
@@ -430,6 +435,24 @@ async def job_liq_guard(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await liq_guard.guard_tick(send)
     except Exception:
         log.exception("liq_guard job failed")
+    _resched_guard(ctx)
+
+
+def _resched_guard(ctx) -> None:
+    """runtime_flags 의 감시 간격이 등록된 값과 다르면 잡을 새 간격으로 다시 등록한다(재시작 불필요)."""
+    global _guard_job_interval
+    try:
+        want = runtime_flags.guard_interval_sec()
+        if _guard_job_interval is None or want == _guard_job_interval or ctx.job_queue is None:
+            return
+        for j in ctx.job_queue.get_jobs_by_name("liq_guard"):
+            j.schedule_removal()
+        ctx.job_queue.run_repeating(job_liq_guard, interval=want, first=want, name="liq_guard",
+                                    job_kwargs=GUARD_JOB_KWARGS)
+        _guard_job_interval = want
+        log.info("liq_guard 간격 변경: %d초", want)
+    except Exception:
+        log.exception("liq_guard 간격 재등록 실패")
 
 
 async def cmd_dcaoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -444,7 +467,16 @@ async def cmd_dcaon(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     args = [a.lower() for a in (ctx.args or [])]
-    usage = "사용법: /guard off|shadow|live  또는  /guard share <0~1>"
+    usage = "사용법: /guard off|shadow|live  |  /guard share <0~1>  |  /guard interval <5~300초>"
+    if len(args) == 2 and args[0] == "interval":
+        try:
+            sec = int(args[1])
+            runtime_flags.set_guard_interval_sec(sec)
+        except ValueError:
+            await update.message.reply_text("간격은 5~300 사이 정수(초)여야 해요. 예: /guard interval 15")
+            return
+        await update.message.reply_text(f"감시 간격: {sec}초 (다음 확인부터 반영)")
+        return
     if len(args) == 1 and args[0] in runtime_flags.GUARD_MODES:
         runtime_flags.set_guard_mode(args[0])
         await update.message.reply_text(f"방어 투입 모드: {args[0]}")
@@ -456,7 +488,7 @@ async def cmd_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError:
             await update.message.reply_text("share 는 0~1 사이 숫자여야 해요. 예: /guard share 1.0")
             return
-        await update.message.reply_text(f"담보 최소 비중: {share:.2f} (1.0 = 담보만)")
+        await update.message.reply_text(f"담보 비중: {share:.2f} (1.0 = 담보만, 0.3 = 담보 3 : 매수 7)")
         return
     await update.message.reply_text(usage)
 

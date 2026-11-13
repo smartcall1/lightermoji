@@ -20,44 +20,64 @@ log = logging.getLogger(__name__)
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "liq_guard_state.json")
 
+LIQ_MISMATCH_TOL = 0.005  # 계산 부분청산가와 API 청산가 허용 오차(0.5%)
+
 _now = time.time  # 시험에서 교체
 
 _alert_last: dict[str, float] = {}      # 알림 키 -> 마지막 전송 시각 (쿨다운)
 _shadow_last: dict[str, float] = {}     # 종목 -> 마지막 그림자 알림 시각 (1시간 1회)
 _shadow_in_trigger: set[str] = set()    # 그림자에서 트리거 상태였던 종목 (진입 시점 알림용)
+_market_cache: dict[str, tuple] = {}     # 종목 -> (시각, market_info, 증거금 비율 원본) 1시간 캐시
 _status: dict[str, dict] = {}           # 종목별 마지막 계산값 (/guardstatus)
 _last_check_ts: float | None = None
 
 
 # ── 순수 계산 ────────────────────────────────────────────────
 
-def compute_levels(pos: dict, mmf_raw=None) -> dict | None:
-    """명세 1.2. 필수 값(imf, 명목가, 수량)이 없으면 None.
+def _frac(raw) -> float | None:
+    """orderBookDetails 비율(1/10000 단위 정수) -> 0~1 분수. 못 읽거나 0 이하·1 이상이면 None."""
+    try:
+        v = float(raw) / 10_000.0
+    except (TypeError, ValueError):
+        return None
+    return v if 0 < v < 1 else None
 
-    mmf_raw: orderBookDetails maintenance_margin_fraction 원본(단위 미확정 — 10,000분율로 추정).
-    MMF = max(MMF_RATIO x IMF, 읽은 값). 읽은 값이 비정상(<=0, IMF 이상)이면 버리고 대체값 사용.
+
+def market_fractions(mm: dict | None) -> tuple[float, float] | None:
+    """(차단선 IMF, MMF). 필수 값을 못 읽으면 None - 대체값 없이 투입하지 않는다(fail closed)."""
+    if not mm:
+        return None
+    mmf = _frac(mm.get("maintenance_margin_fraction"))
+    mn = _frac(mm.get("min_initial_margin_fraction"))
+    if mmf is None or mn is None:
+        return None
+    if config.LIQ_GUARD_BLOCK_IMF_SOURCE == "min":
+        return mn, mmf
+    df = _frac(mm.get("default_initial_margin_fraction"))
+    if df is None:
+        return None
+    return max(mn, df), mmf
+
+
+def compute_levels(pos: dict, mm: dict | None = None) -> dict | None:
+    """차단선·부분청산선 계산. 시장 비율(mm)이 없거나 비정상이면 None.
+
+    E = allocated_margin + unrealized_pnl (allocated_margin 은 미실현손익 제외 담보 - 폰 실측 검산으로 확인).
+    차단선 IMF(imf_b)는 시장 비율, MMF 는 시장 maintenance_margin_fraction. 포지션 레버리지(imf_raw)는
+    매수 명목 계산(lev)에만 쓴다. API liquidation_price 는 MMF 선(부분청산 시작선)과 일치.
     """
+    fr = market_fractions(mm)
     imf_raw = float(pos.get("imf_raw") or 0)
     n = abs(float(pos.get("value") or 0))
     q = abs(float(pos.get("size") or 0))
-    if imf_raw <= 0 or n <= 0 or q <= 0:
+    if fr is None or imf_raw <= 0 or n <= 0 or q <= 0:
         return None
-    imf = imf_raw / 100.0
-    if imf >= 1:
-        return None
-    mmf = config.LIQ_GUARD_MMF_RATIO * imf
-    parsed = None
-    try:
-        parsed = float(mmf_raw) / 10_000.0 if mmf_raw is not None else None
-    except (TypeError, ValueError):
-        parsed = None
-    if parsed is not None and 0 < parsed < imf:
-        mmf = max(mmf, parsed)
+    imf_b, mmf = fr
     e = float(pos.get("margin") or 0) + float(pos.get("upnl") or 0)
     a = e / n
     return {
-        "imf": imf, "mmf": mmf, "e": e, "n": n, "q": q, "lev": 1.0 / imf,
-        "x_block": (a - imf) / (1 - imf) * 100.0,
+        "imf": imf_b, "mmf": mmf, "e": e, "n": n, "q": q, "lev": 100.0 / imf_raw,
+        "x_block": (a - imf_b) / (1 - imf_b) * 100.0,
         "x_part": (a - mmf) / (1 - mmf) * 100.0,
         "p_part": (n - e) / (q * (1 - mmf)),
         "mark": float(pos.get("current") or 0),
@@ -65,7 +85,7 @@ def compute_levels(pos: dict, mmf_raw=None) -> dict | None:
 
 
 def post_levels(lv: dict, collateral: float, buy_margin: float) -> dict:
-    """투입 후 예상 거리 (명세 2.2: E2=E+B, 매수분만큼 N 증가, 평단 가중)."""
+    """투입 후 예상 거리: E2=E+B, 매수분(마진 x 레버리지)만큼 N 증가."""
     e2 = lv["e"] + collateral + buy_margin
     add_n = buy_margin * lv["lev"]
     n2 = lv["n"] + add_n
@@ -80,18 +100,24 @@ def post_levels(lv: dict, collateral: float, buy_margin: float) -> dict:
 
 
 def plan_injection(lv: dict, budget: float, share: float, target_pct: float) -> dict:
-    """담보 먼저 -> 목표 완충까지 채운 뒤 남는 금액만 매수 (명세 2.6).
+    """담보 먼저 -> 목표 완충(투입 후 x_block=TARGET)까지 채운 뒤 남는 금액만 매수.
 
+    post_levels 모델을 그대로 푼다: (E+B)/(N+m*L) = k, k = imf_b + XT*(1-imf_b)  =>  m = ((E+B)/k - N)/L.
     부분청산 구간(x_part<0)이면 매수 없이 담보만.
     """
     imf, n, e, lev = lv["imf"], lv["n"], lv["e"], lv["lev"]
     xt = target_pct / 100.0
-    raw_m = (e + budget - imf * n - xt * (1 - imf) * n) / (1 + xt * (1 - imf) * lev)
+    k = imf + xt * (1 - imf)
+    raw_m = ((e + budget) / k - n) / lev
     partial_zone = lv["x_part"] < 0
     if partial_zone:
         m = 0.0
-    else:
+    elif config.LIQ_GUARD_SPLIT == "target":
+        # share = 담보 최소 비중. 목표 공식으로 매수를 줄인다
         m = min(max(raw_m, 0.0), budget * (1 - share))
+    else:
+        # fixed: share = 담보 비중 그대로 (0.3 -> 담보 30 : 매수 70)
+        m = budget * (1 - share)
     c = budget - m
     after = post_levels(lv, c, m)
     return {
@@ -165,11 +191,11 @@ def _fmt_levels(lv: dict, pos: dict) -> str:
             f"(청산가 {fmt_price(pos['liq'])})")
 
 
-def _log_raw(pos: dict, lv: dict | None, mmf_raw) -> None:
+def _log_raw(pos: dict, lv: dict | None, mm) -> None:
     log.info(
-        "[GUARD-RAW] %s imf_raw=%s mmf_raw=%s allocated_margin=%s position_value=%s "
+        "[GUARD-RAW] %s imf_raw=%s market_raw=%s allocated_margin=%s position_value=%s "
         "unrealized_pnl=%s api_liq=%s calc_p_part=%s x_block=%s x_part=%s",
-        pos.get("symbol"), pos.get("imf_raw"), mmf_raw, pos.get("margin"), pos.get("value"),
+        pos.get("symbol"), pos.get("imf_raw"), mm, pos.get("margin"), pos.get("value"),
         pos.get("upnl"), pos.get("liq"),
         f"{lv['p_part']:.6g}" if lv else None,
         f"{lv['x_block']:.3f}" if lv else None, f"{lv['x_part']:.3f}" if lv else None,
@@ -228,17 +254,27 @@ async def guard_tick(send) -> None:
 
 async def _handle_position(send, mode: str, pos: dict, state: dict, available: float) -> float:
     symbol, mid = pos["symbol"], str(pos.get("market_id"))
-    try:
-        market = await fetch_market_info(symbol)
-    except Exception as e:
-        await _alert(send, f"nomarket:{mid}", f"[방어 확인] {pos['name']} - 시장 정보 없음 ({e})")
-        return available
-    margin_info = await fetch_market_margin(market["market_id"])
-    mmf_raw = (margin_info or {}).get("maintenance_margin_fraction")
-    lv = compute_levels(pos, mmf_raw)
-    _log_raw(pos, lv, mmf_raw)
+    cached = _market_cache.get(symbol)
+    if cached and _now() - cached[0] < config.LIQ_GUARD_MARKET_CACHE_SEC:
+        market, margin_info = cached[1], cached[2]
+    else:
+        try:
+            market = await fetch_market_info(symbol)
+        except Exception as e:
+            await _alert(send, f"nomarket:{mid}", f"[방어 확인] {pos['name']} - 시장 정보 없음 ({e})")
+            return available
+        margin_info = await fetch_market_margin(market["market_id"])
+        if market_fractions(margin_info) is not None:  # 읽기 실패·비정상 값은 캐시하지 않고 다음 확인에서 재시도
+            _market_cache[symbol] = (_now(), market, margin_info)
+    lv = compute_levels(pos, margin_info)
+    _log_raw(pos, lv, margin_info)
     if lv is None:
-        await _alert(send, f"nolv:{mid}", f"[방어 확인] {pos['name']} - 증거금 계산 불가(필드 이상) - 투입 안 함")
+        await _alert(send, f"nolv:{mid}", f"[방어 확인] {pos['name']} - 시장 증거금 비율을 읽지 못함/비정상 - 투입 안 함")
+        return available
+    api_liq = float(pos.get("liq") or 0)
+    if api_liq <= 0 or abs(lv["p_part"] - api_liq) / api_liq > LIQ_MISMATCH_TOL:
+        await _alert(send, f"mismatch:{mid}",
+                     f"[방어 확인] 청산가 계산 불일치 - 투입 안 함 (계산 {fmt_price(lv['p_part'])} / API {fmt_price(api_liq)})")
         return available
 
     _status[symbol] = {"x_block": lv["x_block"], "x_part": lv["x_part"], "liq": pos["liq"],
@@ -285,10 +321,12 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
 
     def replan(acc: dict) -> float:
         ps = [p for p in parse_positions(acc) if str(p.get("market_id")) == mid]
-        lv2 = compute_levels(ps[0], mmf_raw) if ps else None
+        lv2 = compute_levels(ps[0], margin_info) if ps else None
         if lv2 is None:
             return 0.0
-        # 담보가 반영된 상태에서, 남은 예산(계획 매수 마진) 안에서 다시 계산 - 줄이기만 한다
+        if config.LIQ_GUARD_SPLIT != "target":
+            return plan["buy_margin"]  # fixed: 계획한 비율 그대로 (부분청산 구간이면 이미 0)
+        # target: 담보가 반영된 상태에서, 남은 예산(계획 매수 마진) 안에서 다시 계산 - 줄이기만 한다
         return plan_injection(lv2, plan["buy_margin"], 0.0, config.LIQ_GUARD_TARGET_PCT)["buy_margin"]
 
     res = await execute_guard(
@@ -297,7 +335,7 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
     )
     if res.busy:
         return available
-    if res.collateral_sent:
+    if res.collateral_sent or res.dca is not None:  # 담보 접수 또는 매수 시도가 있었으면 기록
         state[mid] = lv["mark"]
         save_state(state)
 
@@ -306,7 +344,7 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
         acc2 = await fetch_account()
         ps = [p for p in parse_positions(acc2) if str(p.get("market_id")) == mid] if acc2 else []
         if ps:
-            lv2 = compute_levels(ps[0], mmf_raw)
+            lv2 = compute_levels(ps[0], margin_info)
             if lv2:
                 after_txt = (f"\n투입 후: {_fmt_levels(lv2, ps[0])}\n평단 {fmt_price(pos['entry'])} -> "
                              f"{fmt_price(ps[0]['entry'])}  |  가용 잔고 ${float(acc2.get('available_balance', 0)):.0f}")
@@ -331,7 +369,8 @@ def format_status() -> str:
     lines = [
         f"방어 투입 모드: {runtime_flags.guard_mode()}",
         f"정기 DCA: {'켜짐' if runtime_flags.regular_dca_enabled() else '꺼짐'}",
-        f"담보 최소 비중: {runtime_flags.collateral_min_share():.2f} | 1회 ${config.LIQ_GUARD_BUDGET_USD:.0f} | "
+        f"분할: {config.LIQ_GUARD_SPLIT} (담보 비중 {runtime_flags.collateral_min_share():.2f}) | "
+        f"간격 {runtime_flags.guard_interval_sec()}초 | 1회 ${config.LIQ_GUARD_BUDGET_USD:.0f} | "
         f"트리거 {config.LIQ_GUARD_TRIGGER_PCT}% / 목표 {config.LIQ_GUARD_TARGET_PCT}%",
     ]
     if _last_check_ts:
