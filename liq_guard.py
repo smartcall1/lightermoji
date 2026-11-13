@@ -234,10 +234,10 @@ async def guard_tick(send) -> None:
     state = load_state()
     open_ids = {str(p.get("market_id")) for p in positions}
     pruned = {k: v for k, v in state.items() if k in open_ids}
-    # 가격이 직전 투입가 위로 회복하면 기록 초기화
+    # 가격이 직전 투입가 대비 REARM% 넘게 반등해야 기록 초기화(작은 등락으로 재투입 방지)
     for p in targets:
         k = str(p.get("market_id"))
-        if k in pruned and p["current"] > pruned[k]:
+        if k in pruned and p["current"] > pruned[k] * (1 + config.LIQ_GUARD_REARM_PCT / 100.0):
             del pruned[k]
     if pruned != state:
         save_state(pruned)

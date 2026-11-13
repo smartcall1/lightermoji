@@ -324,6 +324,27 @@ async def test_rearm_resets_when_price_recovers(monkeypatch):
     assert w.guard.await_count == 2
 
 
+async def test_rearm_kept_on_small_bounce(monkeypatch):
+    set_mode("live")
+    w = World(monkeypatch, account([pos_x(1.9)]))
+    await w.tick()
+    assert w.guard.await_count == 1
+    w.acct = account([pos_x(1.9, mark=100.5)])  # +0.5%: 기록 유지, 재투입 0
+    await w.tick()
+    assert liq_guard.load_state() == {"1": pytest.approx(100.0)}
+    assert w.guard.await_count == 1
+
+
+async def test_rearm_cleared_on_big_bounce(monkeypatch):
+    set_mode("live")
+    w = World(monkeypatch, account([pos_x(1.9)]))
+    await w.tick()
+    w.acct = account([pos_x(1.9, mark=101.1)])  # +1.1%: 기록 삭제
+    await w.tick()
+    assert w.guard.await_count == 2  # 기록이 지워져 재투입됨
+    assert liq_guard.load_state() == {"1": pytest.approx(101.1)}
+
+
 async def test_rearm_recorded_for_buy_only_share_zero(monkeypatch):
     set_mode("live")
     runtime_flags.set_collateral_min_share(0.0)
