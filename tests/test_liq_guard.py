@@ -613,3 +613,15 @@ async def test_failed_result_alert_has_cooldown_but_success_does_not(monkeypatch
     await w.tick()
     assert w.guard.await_count == 2
     assert len([x for x in w.sent if "중단" in x]) == 1
+
+
+async def test_busy_restores_previous_mark_in_file(monkeypatch):
+    set_mode("live")
+    w = World(monkeypatch, account([pos_x(1.9)]))
+    liq_guard.save_state({"1": 150.0})  # 이전 투입 가격 (현재 mark 100 은 충분히 아래)
+    w.guard.return_value = dca_engine.GuardResult(symbol="X", busy=True)
+    await w.tick()
+    assert w.guard.await_count == 1
+    assert liq_guard.load_state() == {"1": 150.0}
+    await w.tick()
+    assert w.guard.await_count == 2
