@@ -582,7 +582,9 @@ async def _run_buynow(symbol: str, amount: float) -> str:
         return f"❌ 물타기 실패 — {name}\n{e}"
     log.info("[BUYNOW] %s 결과 체결=$%.2f 수량=%.6f 평균=%.6f 오류=%s skip=%s",
              symbol, result.filled_usdc, result.filled_amount, result.avg_price, result.error, result.skipped)
-    return format_dca_notification(result)
+    if result.error:
+        return f"❌ 물타기 실패 — {name}\n{result.error}"
+    return format_dca_notification(result, title="물타기")
 
 
 async def cb_buynow_go(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -605,6 +607,11 @@ async def cb_buynow_go(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if _buynow_expired(st):
         await query.edit_message_text("시간이 지나 취소됐어요. 다시 /buynow")
         return
+    try:
+        await query.edit_message_text(
+            f"⏳ {st['symbol']} 주문 넣는 중… (지정가로 사서 30초~몇 분 걸릴 수 있어요)")
+    except Exception:
+        log.warning("[BUYNOW] 진행 안내 메시지 수정 실패, 주문은 계속 진행")
     msg = await _run_buynow(st["symbol"], st["amount"])
     try:
         await query.edit_message_text(msg)

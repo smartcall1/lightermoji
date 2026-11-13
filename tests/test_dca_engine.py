@@ -57,6 +57,11 @@ def test_calc_order_price_retry_0():
     assert price == pytest.approx(600.0, rel=1e-3)
 
 
+def test_calc_order_price_first_premium():
+    assert _calc_order_price(100.0, 0, 0.05, 0.1) == pytest.approx(100.1)
+    assert _calc_order_price(100.0, 2, 0.05, 0.1) == pytest.approx(100.2)
+
+
 def test_calc_order_price_retry_5():
     price = _calc_order_price(base_price=600.0, retry=5, step_pct=0.05)
     assert price == pytest.approx(601.5, rel=1e-3)

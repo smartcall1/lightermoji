@@ -134,8 +134,37 @@ async def test_confirm_screen_and_single_order_on_double_click(world):
     await lb.cb_buynow_go(q2, ctx())
     world.buy.assert_awaited_once()
     assert world.buy.call_args[0] == ("BTCUSD", pytest.approx(400.0))  # 명목가 = 증거금 x 레버리지
-    assert "DCA 완료" in q1.edit_message_text.call_args[0][0]
+    assert "물타기 완료" in q1.edit_message_text.call_args[0][0]
     assert q2.answer.call_args[0][0].startswith("이미 처리")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("progress_fails", [False, True])
+async def test_progress_message_before_order(world, progress_fails):
+    await to_confirm("100")
+    q = cb_update(f"bn_go:{lb._buynow[OWNER]['token']}")
+    order = []
+    calls = []
+
+    async def edit(text):
+        calls.append(text)
+        order.append("edit")
+        if progress_fails and len(calls) == 1:
+            raise RuntimeError("edit failed")
+
+    async def buy(*a, **k):
+        order.append("buy")
+        return dca_engine.DCAResult(symbol="BTCUSD", filled_usdc=400.0, target_usdc=400.0,
+                                    filled_amount=4.0, avg_price=100.0)
+
+    q.callback_query.edit_message_text = AsyncMock(side_effect=edit)
+    world.buy.side_effect = buy
+    await lb.cb_buynow_go(q, ctx())
+    assert order[:2] == ["edit", "buy"]
+    assert "주문 넣는 중" in calls[0] and "BTCUSD" in calls[0]
+    if not progress_fails:
+        assert "물타기 완료" in calls[-1]
+    world.buy.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -247,3 +276,21 @@ async def test_execute_buynow_busy_and_leaves_guard_state(monkeypatch, tmp_path)
     res = await dca_engine.execute_buynow("BTCUSD", 400.0)
     assert res.error and res.filled_usdc == 0
     assert not (tmp_path / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_buynow_titles_not_dca(world):
+    await to_confirm("100")
+    q = cb_update(f"bn_go:{lb._buynow[OWNER]['token']}")
+    await lb.cb_buynow_go(q, ctx())
+    ok = q.edit_message_text.call_args[0][0]
+    assert "물타기 완료" in ok and "DCA" not in ok
+    world.buy.return_value = dca_engine.DCAResult(
+        symbol="BTCUSD", filled_usdc=0, target_usdc=400, filled_amount=0, avg_price=0, error="거부")
+    await to_confirm("100")
+    q = cb_update(f"bn_go:{lb._buynow[OWNER]['token']}")
+    await lb.cb_buynow_go(q, ctx())
+    bad = q.edit_message_text.call_args[0][0]
+    assert "물타기 실패" in bad and "DCA" not in bad
+    assert "DCA 완료" in dca_engine.format_dca_notification(dca_engine.DCAResult(
+        symbol="BTCUSD", filled_usdc=1, target_usdc=1, filled_amount=1, avg_price=1))

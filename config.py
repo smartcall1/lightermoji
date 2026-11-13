@@ -67,6 +67,7 @@ MIN_LIQ_DISTANCE_PCT: float = float(os.getenv("MIN_LIQ_DISTANCE_PCT", "5"))
 MIN_AVAILABLE_BALANCE: float = float(os.getenv("MIN_AVAILABLE_BALANCE", "30"))
 ORDER_RETRY_INTERVAL_SEC: int = int(os.getenv("ORDER_RETRY_INTERVAL_SEC", "30"))
 ORDER_PRICE_STEP_PCT: float = float(os.getenv("ORDER_PRICE_STEP_PCT", "0.05"))
+ORDER_FIRST_PREMIUM_PCT: float = float(os.getenv("ORDER_FIRST_PREMIUM_PCT", "0.1"))
 ORDER_MAX_RETRIES: int = int(os.getenv("ORDER_MAX_RETRIES", "20"))
 CLOSE_SLIPPAGE_PCT: float = float(os.getenv("CLOSE_SLIPPAGE_PCT", "1.0"))
 # 미체결 주문 취소 후 호가창에서 실제로 사라졌는지 재확인하는 횟수/간격.
