@@ -581,3 +581,35 @@ async def test_interval_command_and_resched(monkeypatch):
     lighter_bot._resched_guard(jctx)
     old.schedule_removal.assert_called_once()
     assert jctx.job_queue.run_repeating.call_args.kwargs["interval"] == 30
+
+
+async def test_rearm_locked_when_execute_guard_raises_after_collateral(monkeypatch):
+    set_mode("live")
+    w = World(monkeypatch, account([pos_x(1.9)]))
+    w.guard.side_effect = RuntimeError("fetch failed after collateral")
+    await w.tick()
+    await w.tick()  # 같은 가격 -> 투입 0
+    assert w.guard.await_count == 1
+    assert len([x for x in w.sent if "처리 중 오류" in x]) == 1  # 오류 알림도 쿨다운
+
+
+async def test_busy_does_not_lock_rearm(monkeypatch):
+    set_mode("live")
+    w = World(monkeypatch, account([pos_x(1.9)]))
+    w.guard.return_value = dca_engine.GuardResult(symbol="X", busy=True)
+    await w.tick()
+    assert liq_guard.load_state() == {}
+    await w.tick()
+    assert w.guard.await_count == 2
+
+
+async def test_failed_result_alert_has_cooldown_but_success_does_not(monkeypatch):
+    set_mode("live")
+    w = World(monkeypatch, account([pos_x(1.9)]))
+    w.guard.return_value = dca_engine.GuardResult(symbol="X", collateral_sent=True, collateral_usdc=50,
+                                                  error="담보 반영 확인 실패")
+    await w.tick()
+    liq_guard.save_state({})
+    await w.tick()
+    assert w.guard.await_count == 2
+    assert len([x for x in w.sent if "중단" in x]) == 1

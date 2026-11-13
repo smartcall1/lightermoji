@@ -329,15 +329,21 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
         # target: 담보가 반영된 상태에서, 남은 예산(계획 매수 마진) 안에서 다시 계산 - 줄이기만 한다
         return plan_injection(lv2, plan["buy_margin"], 0.0, config.LIQ_GUARD_TARGET_PCT)["buy_margin"]
 
+    # 주문 전에 REARM 기록부터 남긴다: 중간에 예외·취소가 나도 같은 가격에서 다시 투입되지 않게(잠기는 쪽)
+    prev = state.get(mid)
+    state[mid] = lv["mark"]
+    save_state(state)
     res = await execute_guard(
         symbol, market["market_id"], plan["collateral"], plan["buy_margin"], lv["lev"],
         replan=replan, max_retries=config.LIQ_GUARD_MAX_RETRIES,
     )
-    if res.busy:
-        return available
-    if res.collateral_sent or res.dca is not None:  # 담보 접수 또는 매수 시도가 있었으면 기록
-        state[mid] = lv["mark"]
+    if res.busy:  # 아무것도 안 했으니 기록을 되돌린다
+        if prev is None:
+            state.pop(mid, None)
+        else:
+            state[mid] = prev
         save_state(state)
+        return available
 
     after_txt = ""
     try:
@@ -361,7 +367,10 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
         note += f"\n중단: {res.error}"
     if plan["unresolved"]:
         note += "\n차단 미해소 - 수동 확인"
-    await send(head + after_txt + note)
+    if res.error:
+        await _alert(send, f"err:{mid}", head + after_txt + note)  # 실패 반복 도배 방지(쿨다운)
+    else:
+        await send(head + after_txt + note)
     return available
 
 
