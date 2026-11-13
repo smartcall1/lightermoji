@@ -276,5 +276,5 @@ def test_register_jobs_real_scheduler_keeps_grace():
     from lighter_bot import register_jobs, JOB_MISFIRE_GRACE_SEC
     app = Application.builder().token("123:abc").build()
     register_jobs(app.job_queue)
-    jobs = app.job_queue.scheduler.get_jobs()
+    jobs = [j for j in app.job_queue.scheduler.get_jobs() if j.name != "liq_guard"]  # guard 는 60초 주기라 grace 120초 별도
     assert jobs and all(j.misfire_grace_time == JOB_MISFIRE_GRACE_SEC and j.coalesce for j in jobs)

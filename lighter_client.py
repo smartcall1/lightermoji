@@ -87,6 +87,33 @@ async def fetch_mark_price(market_id: int) -> float | None:
     return None
 
 
+async def fetch_market_margin(market_id: int) -> dict | None:
+    """orderBookDetails 에서 증거금 비율 원본값 조회. 단위는 미확정이라 원본 그대로 돌려준다.
+
+    {"maintenance_margin_fraction": 원본, "min_initial_margin_fraction": 원본} — 읽지 못하면 None.
+    """
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(
+                f"{API_BASE}/orderBookDetails",
+                params={"market_id": market_id},
+                headers=HEADERS,
+                timeout=15,
+            )
+            r.raise_for_status()
+            details = r.json().get("order_book_details", [])
+            if details:
+                d = details[0]
+                return {
+                    "maintenance_margin_fraction": d.get("maintenance_margin_fraction"),
+                    "min_initial_margin_fraction": d.get("min_initial_margin_fraction"),
+                    "default_initial_margin_fraction": d.get("default_initial_margin_fraction"),
+                }
+        except Exception as e:
+            log.warning("시장 증거금 비율 조회 실패: %s", e)
+    return None
+
+
 def encode_price(price_float: float, price_decimals: int) -> int:
     return int(round(price_float * (10 ** price_decimals)))
 
@@ -108,6 +135,26 @@ async def set_leverage(market_id: int, leverage: int, account_index: int) -> str
     if err:
         return f"레버리지 설정 실패: {err}"
     log.info("레버리지 설정 완료: market_id=%d leverage=%dx", market_id, leverage)
+    return None
+
+
+async def add_isolated_margin(market_id: int, usdc: float, account_index: int) -> str | None:
+    """isolated 포지션에 담보(USDC)를 추가. 성공 시 None, 실패 시 에러 메시지 반환. 재시도하지 않는다."""
+    signer = _make_signer(account_index)
+    try:
+        _tx_info, _resp, err = await signer.update_margin(
+            market_index=market_id,
+            usdc_amount=usdc,
+            direction=signer.ISOLATED_MARGIN_ADD_COLLATERAL,
+            api_key_index=LIGHTER_API_KEY_INDEX,
+        )
+    except Exception as e:
+        return f"담보 추가 실패: {e}"
+    finally:
+        await _close_clients(signer)
+    if err:
+        return f"담보 추가 실패: {err}"
+    log.info("담보 추가 완료: market_id=%d usdc=%.2f", market_id, usdc)
     return None
 
 

@@ -5,3 +5,4 @@ __pycache__/
 .pytest_cache/
 logs/
 .lighter_bot.lock
+data/

@@ -16,8 +16,13 @@ from config import (
     DCA_MARKETS, DCA_TIME_AEST, MONITOR_HOURS_AEST, AEST_OFFSET,
     add_dca_market, remove_dca_market,
 )
+import config
+import liq_guard
+import runtime_flags
 from monitor import get_full_status, fetch_account, parse_positions, SYMBOL_NAMES
 
+GUARD_JOB_KWARGS = {"misfire_grace_time": 120, "coalesce": True, "max_instances": 1}
+_guard_job_interval: int | None = None
 JOB_MISFIRE_GRACE_SEC = 1800  # 스케줄 잡이 이만큼 늦게 깨도 건너뛰지 않고 실행(11-05)
 
 
@@ -39,6 +44,14 @@ def register_jobs(jq):
         utc_t = _aest_to_utc(aest_h)
         jq.run_daily(job_monitor, time=utc_t, name=f"monitor_{aest_h:02d}aest", job_kwargs=late_ok)
     log.info("모니터 잡 등록: AEST %s", ", ".join(f"{h:02d}:00" for h in MONITOR_HOURS_AEST))
+
+    # 방어 투입: 모드(off|shadow|live)는 data/runtime_flags.json 에서 매 실행 시점에 읽는다(off 면 즉시 반환).
+    jq.run_repeating(
+        job_liq_guard, interval=config.LIQ_GUARD_INTERVAL_SEC, first=30, name="liq_guard",
+        job_kwargs=GUARD_JOB_KWARGS,
+    )
+    global _guard_job_interval
+    _guard_job_interval = config.LIQ_GUARD_INTERVAL_SEC
 from lighter_client import fetch_market_info, set_leverage, get_account_index
 from dca_engine import (
     execute_dca, format_dca_notification, close_position, format_close_notification,
@@ -119,7 +132,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"  /config    — 현재 DCA 설정\n"
         f"  /addcoin <티커> <금액> [레버리지]   — DCA 종목 추가/수정\n"
         f"  /removecoin <티커>                — DCA 종목 제거\n"
-        f"  /leverage <티커> <배수>            — 레버리지만 변경"
+        f"  /leverage <티커> <배수>            — 레버리지만 변경\n"
+        f"  /dcaoff, /dcaon                   — 정기 DCA 끄기/켜기\n"
+        f"  /guard off|shadow|live            — 청산 방어 투입 모드\n"
+        f"  /guard share <0~1>                — 담보 비중\n"
+        f"  /guard interval <초>              — 감시 간격(5~300)\n"
+        f"  /guardstatus                      — 방어 투입 현황"
     )
 
 
@@ -410,7 +428,79 @@ async def job_monitor(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_safe_message(ctx.bot, chat_id=int(TELEGRAM_CHAT_ID), text=msg)
 
 
+async def job_liq_guard(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def send(text: str) -> None:
+        await _send_safe_message(ctx.bot, chat_id=int(TELEGRAM_CHAT_ID), text=text)
+    try:
+        await liq_guard.guard_tick(send)
+    except Exception:
+        log.exception("liq_guard job failed")
+    _resched_guard(ctx)
+
+
+def _resched_guard(ctx) -> None:
+    """runtime_flags 의 감시 간격이 등록된 값과 다르면 잡을 새 간격으로 다시 등록한다(재시작 불필요)."""
+    global _guard_job_interval
+    try:
+        want = runtime_flags.guard_interval_sec()
+        if _guard_job_interval is None or want == _guard_job_interval or ctx.job_queue is None:
+            return
+        for j in ctx.job_queue.get_jobs_by_name("liq_guard"):
+            j.schedule_removal()
+        ctx.job_queue.run_repeating(job_liq_guard, interval=want, first=want, name="liq_guard",
+                                    job_kwargs=GUARD_JOB_KWARGS)
+        _guard_job_interval = want
+        log.info("liq_guard 간격 변경: %d초", want)
+    except Exception:
+        log.exception("liq_guard 간격 재등록 실패")
+
+
+async def cmd_dcaoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    runtime_flags.set_regular_dca(False)
+    await update.message.reply_text("정기 DCA를 껐어요. 수동 /dca 는 그대로 쓸 수 있어요. 다시 켜려면 /dcaon")
+
+
+async def cmd_dcaon(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    runtime_flags.set_regular_dca(True)
+    await update.message.reply_text("정기 DCA를 켰어요.")
+
+
+async def cmd_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    args = [a.lower() for a in (ctx.args or [])]
+    usage = "사용법: /guard off|shadow|live  |  /guard share <0~1>  |  /guard interval <5~300초>"
+    if len(args) == 2 and args[0] == "interval":
+        try:
+            sec = int(args[1])
+            runtime_flags.set_guard_interval_sec(sec)
+        except ValueError:
+            await update.message.reply_text("간격은 5~300 사이 정수(초)여야 해요. 예: /guard interval 15")
+            return
+        await update.message.reply_text(f"감시 간격: {sec}초 (다음 확인부터 반영)")
+        return
+    if len(args) == 1 and args[0] in runtime_flags.GUARD_MODES:
+        runtime_flags.set_guard_mode(args[0])
+        await update.message.reply_text(f"방어 투입 모드: {args[0]}")
+        return
+    if len(args) == 2 and args[0] == "share":
+        try:
+            share = float(args[1])
+            runtime_flags.set_collateral_min_share(share)
+        except ValueError:
+            await update.message.reply_text("share 는 0~1 사이 숫자여야 해요. 예: /guard share 1.0")
+            return
+        await update.message.reply_text(f"담보 비중: {share:.2f} (1.0 = 담보만, 0.3 = 담보 3 : 매수 7)")
+        return
+    await update.message.reply_text(usage)
+
+
+async def cmd_guardstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(liq_guard.format_status())
+
+
 async def job_dca(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not runtime_flags.regular_dca_enabled():
+        log.info("DCA 잡 건너뜀 — 정기 DCA 꺼짐(runtime_flags)")
+        return
     log.info("DCA 잡 시작 — %d종목", len(DCA_MARKETS))
     for symbol, usdc in DCA_MARKETS.items():
         try:
@@ -443,6 +533,10 @@ async def post_init(application: Application) -> None:
         BotCommand("addcoin", "DCA 종목 추가/수정 <티커> <금액> [레버리지]"),
         BotCommand("removecoin", "DCA 종목 제거 <티커>"),
         BotCommand("leverage", "레버리지 변경 <티커> <배수>"),
+        BotCommand("dcaoff", "정기 DCA 끄기"),
+        BotCommand("dcaon", "정기 DCA 켜기"),
+        BotCommand("guard", "방어 투입 모드 off|shadow|live / share <0~1>"),
+        BotCommand("guardstatus", "방어 투입 현황"),
     ])
 
 
@@ -478,6 +572,10 @@ def _run_bot_locked() -> None:
     app.add_handler(CommandHandler("addcoin", cmd_addcoin, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("removecoin", cmd_removecoin, filters=OWNER_FILTER))
     app.add_handler(CommandHandler("leverage", cmd_leverage, filters=OWNER_FILTER))
+    app.add_handler(CommandHandler("dcaoff", cmd_dcaoff, filters=OWNER_FILTER))
+    app.add_handler(CommandHandler("dcaon", cmd_dcaon, filters=OWNER_FILTER))
+    app.add_handler(CommandHandler("guard", cmd_guard, filters=OWNER_FILTER))
+    app.add_handler(CommandHandler("guardstatus", cmd_guardstatus, filters=OWNER_FILTER))
     app.add_handler(CallbackQueryHandler(cb_close_ask, pattern=r"^close_ask:"))
     app.add_handler(CallbackQueryHandler(cb_close_yes, pattern=r"^close_yes:"))
     app.add_handler(CallbackQueryHandler(cb_close_no, pattern=r"^close_no$"))

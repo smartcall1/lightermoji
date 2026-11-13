@@ -47,11 +47,14 @@ def _check_safety(
     position: dict | None,
     min_liq_pct: float,
     min_balance: float,
+    *,
+    skip_liq: bool = False,
 ) -> DCASkipReason | None:
     balance = float(account.get("available_balance", "0"))
     if balance < min_balance:
         return DCASkipReason.LOW_BALANCE
-    if position and position.get("liq_dist", 999) < min_liq_pct:
+    # skip_liq: 청산 방어 투입 경로 전용 — 청산가가 가까워서 사는 것이므로 liq 검사만 생략(잔고 검사는 유지)
+    if not skip_liq and position and position.get("liq_dist", 999) < min_liq_pct:
         return DCASkipReason.LIQ_TOO_CLOSE
     return None
 
@@ -93,6 +96,16 @@ async def _settle_order(
     return cancel_confirmed, record
 
 
+_guard_coi_counter = 0
+
+
+def _next_guard_coi_base() -> int:
+    """가드 전용 client_order_index 시작값. 정기 DCA(0~999,999)와 겹치지 않고 호출마다 증가."""
+    global _guard_coi_counter
+    _guard_coi_counter += 1
+    return 1_000_000 + (int(time.time()) % 1_000_000) + _guard_coi_counter * 100
+
+
 async def execute_dca(symbol: str, target_usdc: float) -> DCAResult:
     if symbol in _active_symbols:
         log.warning("[DCA] %s 이미 진행 중인 요청 있음 — 중복 호출 스킵", symbol)
@@ -105,7 +118,10 @@ async def execute_dca(symbol: str, target_usdc: float) -> DCAResult:
         _active_symbols.discard(symbol)
 
 
-async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
+async def _execute_dca_inner(
+    symbol: str, target_usdc: float, *,
+    guard: bool = False, max_retries: int | None = None, coi_base: int | None = None,
+) -> DCAResult:
     log.info("[DCA] %s $%.2f 시작", symbol, target_usdc)
     account_index = await get_account_index()
     market = await fetch_market_info(symbol)
@@ -116,7 +132,8 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
                          filled_amount=0, avg_price=0, error="계정 조회 실패")
 
     position = _find_position(account, symbol)
-    skip_reason = _check_safety(account, position, MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE)
+    skip_reason = _check_safety(account, position, MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE,
+                                skip_liq=guard)
     if skip_reason:
         log.warning("[DCA] %s 스킵: %s", symbol, skip_reason.value)
         return DCAResult(symbol=symbol, filled_usdc=0, target_usdc=target_usdc,
@@ -134,7 +151,7 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
     remaining_usdc = target_usdc
     total_filled_amount = 0.0
     total_filled_usdc = 0.0
-    client_order_index = int(time.time()) % 1_000_000
+    client_order_index = coi_base if coi_base is not None else int(time.time()) % 1_000_000
     market_id = market["market_id"]
 
     def _fail(msg: str) -> DCAResult:
@@ -146,7 +163,7 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
             account_after=account, error=msg,
         )
 
-    for retry in range(ORDER_MAX_RETRIES):
+    for retry in range(max_retries if max_retries is not None else ORDER_MAX_RETRIES):
         limit_price = _calc_order_price(base_price, retry, ORDER_PRICE_STEP_PCT)
         base_amount = remaining_usdc / limit_price
 
@@ -223,7 +240,8 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
             break
 
         position = _find_position(account, symbol)
-        skip_reason = _check_safety(account, position, MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE)
+        skip_reason = _check_safety(account, position, MIN_LIQ_DISTANCE_PCT, MIN_AVAILABLE_BALANCE,
+                                    skip_liq=guard)
         if skip_reason:
             log.warning("[DCA] %s retry 중단(%s) — 잔여 $%.2f 미체결", symbol, skip_reason.value, remaining_usdc)
             break
@@ -241,6 +259,97 @@ async def _execute_dca_inner(symbol: str, target_usdc: float) -> DCAResult:
         position_after=position_after,
         account_after=account,
     )
+
+
+@dataclass
+class GuardResult:
+    symbol: str
+    busy: bool = False                 # 같은 종목 다른 주문 진행 중 — 아무것도 안 함
+    collateral_sent: bool = False      # update_margin 이 오류 없이 접수됨
+    collateral_usdc: float = 0.0
+    collateral_confirmed: bool = False
+    buy_margin: float = 0.0            # 실제 매수에 쓴 마진(재산정 반영)
+    dca: DCAResult | None = None
+    error: str | None = None
+
+
+def _alloc_margin(account: dict | None, market_id: int) -> float | None:
+    if not account:
+        return None
+    for p in account.get("positions", []):
+        if str(p.get("market_id")) == str(market_id):
+            try:
+                return float(p.get("allocated_margin", "0"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+GUARD_VERIFY_ATTEMPTS = 3
+GUARD_VERIFY_INTERVAL_SEC = 3.0
+
+
+async def execute_guard(
+    symbol: str, market_id: int, collateral_usdc: float, buy_margin: float, leverage: float,
+    replan=None, max_retries: int | None = None,
+) -> GuardResult:
+    """청산 방어 투입 1회: 담보 추가 -> 반영 확인 -> (남는 금액) 지정가 매수.
+
+    정기 DCA 와 같은 종목 잠금(_active_symbols) 안에서 전체를 수행한다.
+    replan(account) -> 새 매수 마진: 담보 반영 후 상태로 다시 계산(줄이기만 함). 실패는 모두 중단, 재시도 없음.
+    """
+    from lighter_client import add_isolated_margin
+    if symbol in _active_symbols:
+        log.info("[GUARD] %s 다른 주문 진행 중 — 이번 확인은 건너뜀", symbol)
+        return GuardResult(symbol=symbol, busy=True)
+    _active_symbols.add(symbol)
+    try:
+        res = GuardResult(symbol=symbol, collateral_usdc=collateral_usdc)
+        account_index = await get_account_index()
+        before = _alloc_margin(await fetch_account(), market_id)
+        if before is None:
+            res.error = "투입 전 할당 마진 조회 실패 — 담보 투입 안 함"
+            return res
+
+        if collateral_usdc > 0:
+            err = await add_isolated_margin(market_id, collateral_usdc, account_index)
+            if err:
+                res.error = err
+                return res
+            res.collateral_sent = True
+            account = None
+            for i in range(GUARD_VERIFY_ATTEMPTS):
+                await asyncio.sleep(GUARD_VERIFY_INTERVAL_SEC)
+                try:
+                    account = await fetch_account()
+                except Exception as e:
+                    log.warning("[GUARD] %s 담보 반영 확인 조회 실패: %r", symbol, e)
+                    continue
+                after = _alloc_margin(account, market_id)
+                if after is not None and after - before >= collateral_usdc * 0.9:
+                    res.collateral_confirmed = True
+                    break
+            if not res.collateral_confirmed:
+                res.error = "담보 반영 확인 실패 — 매수 안 함 (Lighter 앱에서 확인 필요)"
+                return res
+        else:
+            account = await fetch_account()
+
+        m = buy_margin
+        if m > 0 and replan is not None:
+            m = max(0.0, min(m, replan(account)))
+        res.buy_margin = m
+        if m <= 0:
+            return res
+        res.dca = await _execute_dca_inner(
+            symbol, m * leverage, guard=True,
+            max_retries=max_retries, coi_base=_next_guard_coi_base(),
+        )
+        if res.dca.error:
+            res.error = res.dca.error
+        return res
+    finally:
+        _active_symbols.discard(symbol)
 
 
 @dataclass
