@@ -191,6 +191,55 @@ def _fmt_levels(lv: dict, pos: dict) -> str:
             f"(청산가 {fmt_price(pos['liq'])})")
 
 
+def _defense_msg(pos: dict, lv: dict, res, pos2: dict | None, lv2: dict | None,
+                 avail_before: float, avail_after: float | None) -> str:
+    """[방어 투입] 6줄 알림(싸장님 11-15 승인). 재조회 값이 없으면 계산한 예상값에 (예상)을 붙인다."""
+    coll = res.collateral_usdc if res.collateral_sent else 0.0
+    parts = []
+    if coll > 0:
+        parts.append(f"담보 ${coll:,.0f}")
+    if res.buy_margin > 0:
+        parts.append(f"매수 마진 ${res.buy_margin:,.0f}")
+    if not parts:
+        line2 = "투입 없음"
+    elif res.buy_margin > 0:
+        line2 = f"투입: {' + '.join(parts)} (명목 ${res.buy_margin * lv['lev']:,.0f})"
+    else:
+        line2 = f"투입: {parts[0]}"
+    est = " (예상)"
+    if pos2 is not None and lv2 is not None:
+        liq_a, xb_a, xp_a, tag = pos2["liq"], lv2["x_block"], lv2["x_part"], ""
+        entry_a = fmt_price(pos2["entry"])
+    else:
+        pl = post_levels(lv, coll, res.buy_margin)
+        liq_a, xb_a, xp_a, tag = pl["p_part"], pl["x_block"], pl["x_part"], est
+        entry = float(pos.get("entry") or 0)
+        mark = lv["mark"]
+        if entry > 0 and res.buy_margin <= 0:
+            entry_a = fmt_price(entry) + est
+        elif entry > 0 and mark > 0:
+            d = res.dca
+            if d is not None and (d.filled_amount or 0) > 0 and (d.avg_price or 0) > 0:
+                add_q, px = d.filled_amount, d.avg_price  # 실제 체결 수량·평균가
+            else:
+                add_q, px = res.buy_margin * lv["lev"] / mark, mark
+            entry_a = fmt_price((entry * lv["q"] + px * add_q) / (lv["q"] + add_q)) + est
+        else:
+            entry_a = "확인 못 함"
+    if avail_after is not None:
+        avail_txt = f"${avail_after:,.0f}"
+    else:
+        avail_txt = f"${avail_before - coll - res.buy_margin:,.0f}{est}"
+    return "\n".join([
+        f"[방어 투입] {pos['name']} 롱 {lv['lev']:.0f}x · 라이터",
+        line2,
+        f"청산가: {fmt_price(pos['liq'])} → {fmt_price(liq_a)}{tag}",
+        f"차단선까지: {lv['x_block']:.1f}% → {xb_a:.1f}% (부분청산선 {lv['x_part']:.1f}% → {xp_a:.1f}%){tag}",
+        f"평단: {fmt_price(pos['entry'])} → {entry_a}",
+        f"가용 잔고: {avail_txt}",
+    ])
+
+
 def _log_raw(pos: dict, lv: dict | None, mm) -> None:
     log.info(
         "[GUARD-RAW] %s imf_raw=%s market_raw=%s allocated_margin=%s position_value=%s "
@@ -345,32 +394,32 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
         save_state(state)
         return available
 
-    after_txt = ""
+    avail_before = available
+    lv2 = pos2 = None
+    avail_after = None
     try:
         acc2 = await fetch_account()
         ps = [p for p in parse_positions(acc2) if str(p.get("market_id")) == mid] if acc2 else []
         if ps:
             lv2 = compute_levels(ps[0], margin_info)
             if lv2:
-                after_txt = (f"\n투입 후: {_fmt_levels(lv2, ps[0])}\n평단 {fmt_price(pos['entry'])} -> "
-                             f"{fmt_price(ps[0]['entry'])}  |  가용 잔고 ${float(acc2.get('available_balance', 0)):.0f}")
+                pos2 = ps[0]
         if acc2:
             available = float(acc2.get("available_balance", available) or available)
+            avail_after = available
     except Exception as e:
         log.warning("[GUARD] 사후 조회 실패: %r", e)
 
-    head = f"[방어 투입] {pos['name']} 롱 {lv['lev']:.0f}x\n투입 전: {_fmt_levels(lv, pos)}\n"
-    head += (f"투입: 담보 ${res.collateral_usdc:.0f} + 매수 마진 ${res.buy_margin:.0f} "
-             f"(명목 ${res.buy_margin * lv['lev']:.0f})") if res.collateral_sent or res.buy_margin else "투입 없음"
+    head = _defense_msg(pos, lv, res, pos2, lv2, avail_before, avail_after)
     note = ""
     if res.error:
         note += f"\n중단: {res.error}"
     if plan["unresolved"]:
         note += "\n차단 미해소 - 수동 확인"
     if res.error:
-        await _alert(send, f"err:{mid}", head + after_txt + note)  # 실패 반복 도배 방지(쿨다운)
+        await _alert(send, f"err:{mid}", head + note)  # 실패 반복 도배 방지(쿨다운)
     else:
-        await send(head + after_txt + note)
+        await send(head + note)
     return available
 
 
