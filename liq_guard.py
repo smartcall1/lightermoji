@@ -327,7 +327,8 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
         return available
 
     _status[symbol] = {"x_block": lv["x_block"], "x_part": lv["x_part"], "liq": pos["liq"],
-                       "p_part": lv["p_part"], "last_inject_mark": state.get(mid), "ts": _now()}
+                       "p_part": lv["p_part"], "last_inject_mark": state.get(mid), "ts": _now(),
+                       "lev": lv["lev"], "side": "롱"}
     triggered = lv["x_block"] <= config.LIQ_GUARD_TRIGGER_PCT
     share = runtime_flags.collateral_min_share()
     budget = config.LIQ_GUARD_BUDGET_USD
@@ -424,25 +425,38 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
 
 
 def format_status() -> str:
-    lines = [
-        f"방어 투입 모드: {runtime_flags.guard_mode()}",
-        f"정기 DCA: {'켜짐' if runtime_flags.regular_dca_enabled() else '꺼짐'}",
-        f"분할: {config.LIQ_GUARD_SPLIT} (담보 비중 {runtime_flags.collateral_min_share():.2f}) | "
-        f"간격 {runtime_flags.guard_interval_sec()}초 | 1회 ${config.LIQ_GUARD_BUDGET_USD:.0f} | "
-        f"트리거 {config.LIQ_GUARD_TRIGGER_PCT}% / 목표 {config.LIQ_GUARD_TARGET_PCT}%",
-    ]
+    """/guardstatus 표시(싸장님 11-15 승인 형식). 표시만 한다."""
     if _last_check_ts:
-        lines.append(f"마지막 확인: {int(_now() - _last_check_ts)}초 전")
+        last = f"마지막 {int(_now() - _last_check_ts)}초 전"
     else:
-        lines.append("마지막 확인: 아직 없음")
-    state = load_state()
+        last = "마지막 확인 아직 없음"
+    dca = "켜짐" if runtime_flags.regular_dca_enabled() else "꺼짐"
+    lines = [
+        f"[방어 상태] 라이터 · {runtime_flags.guard_mode()}",
+        f"{runtime_flags.guard_interval_sec()}초마다 확인 · {last} · 정기 DCA {dca}",
+        f"투입 조건: 차단선까지 {config.LIQ_GUARD_TRIGGER_PCT:.1f}% 아래면 "
+        f"${config.LIQ_GUARD_BUDGET_USD:,.0f} (담보 {runtime_flags.collateral_min_share() * 100:.0f}%), "
+        f"{config.LIQ_GUARD_TARGET_PCT:.1f}%까지 회복이 목표",
+        "",
+    ]
     if not _status:
-        lines.append("(종목별 계산값 아직 없음)")
+        lines.append("종목: 아직 확인 전")
+        return "\n".join(lines)
+    blocks = []
     for sym, s in _status.items():
-        lines.append(f"- {sym}: 차단선까지 {s['x_block']:.1f}% / 부분청산선까지 {s['x_part']:.1f}% "
-                     f"(API 청산가 {fmt_price(s['liq'])}, 계산 {fmt_price(s['p_part'])})")
-    if state:
-        lines.append("마지막 투입가: " + ", ".join(f"market {k}: {fmt_price(v)}" for k, v in state.items()))
-    else:
-        lines.append("마지막 투입가: 없음")
-    return "\n".join(lines)
+        head = f"{sym} {s.get('side') or '롱'}"
+        if s.get("lev"):
+            head += f" {s['lev']:.0f}x"
+        api_liq = float(s.get("liq") or 0)
+        if api_liq > 0 and abs(s["p_part"] - api_liq) / api_liq <= LIQ_MISMATCH_TOL:
+            liq_line = f"청산가: {fmt_price(s['liq'])} (계산 일치)"
+        else:
+            liq_line = f"청산가: {fmt_price(s['liq'])} (계산 {fmt_price(s['p_part'])} — 다름!)"
+        mark = s.get("last_inject_mark")
+        blocks.append("\n".join([
+            head,
+            f"차단선까지: {s['x_block']:.1f}% (부분청산선 {s['x_part']:.1f}%)",
+            liq_line,
+            f"마지막 투입: {fmt_price(mark)} 때" if mark else "마지막 투입: 없음",
+        ]))
+    return "\n".join(lines) + "\n" + "\n\n".join(blocks)
