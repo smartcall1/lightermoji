@@ -508,7 +508,7 @@ async def test_commands_set_flags():
     await lighter_bot.cmd_dcaon(upd, ctx)
     assert runtime_flags.regular_dca_enabled() is True
     await lighter_bot.cmd_guardstatus(upd, ctx)
-    assert "분할: fixed" in upd.message.reply_text.await_args.args[0]
+    assert upd.message.reply_text.await_args.args[0].startswith("[방어 상태] 라이터 · live")
 
 
 def test_register_jobs_has_liq_guard():
@@ -733,3 +733,68 @@ async def test_defense_msg_collateral_failed_buy_only_uses_fill_price(monkeypatc
     assert lines[5] == "가용 잔고: $430 (예상)"
     only = dca_engine.GuardResult(symbol="X", collateral_sent=True, collateral_usdc=30)
     assert liq_guard._defense_msg(pos, lv, only, None, None, 500.0, None).split("\n")[1] == "투입: 담보 $30"
+
+
+# ---- /guardstatus 표시 형식(싸장님 11-15 승인) ----
+def _st(**kw):
+    d = {"x_block": 2.94, "x_part": 7.2, "liq": 64.20, "p_part": 64.20,
+         "last_inject_mark": None, "ts": 0, "lev": 5.0, "side": "롱"}
+    d.update(kw)
+    return d
+
+
+def _status_setup(monkeypatch, dca=False, checked=True):
+    monkeypatch.setattr(config, "LIQ_GUARD_TRIGGER_PCT", 2.0)
+    monkeypatch.setattr(config, "LIQ_GUARD_TARGET_PCT", 4.0)
+    monkeypatch.setattr(config, "LIQ_GUARD_BUDGET_USD", 100.0)
+    monkeypatch.setattr(runtime_flags, "guard_mode", lambda: "live")
+    monkeypatch.setattr(runtime_flags, "guard_interval_sec", lambda: 15)
+    monkeypatch.setattr(runtime_flags, "collateral_min_share", lambda: 0.3)
+    monkeypatch.setattr(runtime_flags, "regular_dca_enabled", lambda: dca)
+    monkeypatch.setattr(liq_guard, "_now", lambda: 1000.0)
+    monkeypatch.setattr(liq_guard, "_last_check_ts", 989.0 if checked else None)
+
+
+def test_format_status_full_layout(monkeypatch):
+    _status_setup(monkeypatch)
+    liq_guard._status["SOL"] = _st()
+    liq_guard._status["BNB"] = _st(x_block=4.8, x_part=6.8, liq=536.84, p_part=536.84)
+    assert liq_guard.format_status() == "\n".join([
+        "[방어 상태] 라이터 · live",
+        "15초마다 확인 · 마지막 11초 전 · 정기 DCA 꺼짐",
+        "투입 조건: 차단선까지 2.0% 아래면 $100 (담보 30%), 4.0%까지 회복이 목표",
+        "",
+        "SOL 롱 5x",
+        "차단선까지: 2.9% (부분청산선 7.2%)",
+        "청산가: $64.20 (계산 일치)",
+        "마지막 투입: 없음",
+        "",
+        "BNB 롱 5x",
+        "차단선까지: 4.8% (부분청산선 6.8%)",
+        "청산가: $536.84 (계산 일치)",
+        "마지막 투입: 없음",
+    ])
+
+
+def test_format_status_variants(monkeypatch):
+    _status_setup(monkeypatch, dca=True, checked=False)
+    liq_guard._status["SOL"] = _st(lev=None, p_part=70.0, last_inject_mark=61.5)
+    out = liq_guard.format_status().split("\n")
+    assert out[1] == "15초마다 확인 · 마지막 확인 아직 없음 · 정기 DCA 켜짐"
+    assert out[4] == "SOL 롱"                      # 배수 없으면 배수만 뺀다
+    assert out[6] == "청산가: $64.20 (계산 $70 — 다름!)"
+    assert out[7] == "마지막 투입: $61.50 때"
+    assert "market" not in "\n".join(out)
+
+
+def test_format_status_no_symbols(monkeypatch):
+    _status_setup(monkeypatch)
+    assert liq_guard.format_status().split("\n")[3:] == ["", "종목: 아직 확인 전"]
+
+
+async def test_tick_stores_lev_and_side_for_status(monkeypatch):
+    set_mode("live")
+    w = World(monkeypatch, account([raw_pos(**ETH)]))
+    await w.tick()
+    st = next(iter(liq_guard._status.values()))
+    assert st["side"] == "롱" and st["lev"] > 0
