@@ -717,3 +717,19 @@ async def test_defense_msg_no_injection(monkeypatch):
     w.guard.return_value = dca_engine.GuardResult(symbol="X", error="x")
     await w.tick()
     assert w.sent[-1].split("\n")[1] == "투입 없음"
+
+
+async def test_defense_msg_collateral_failed_buy_only_uses_fill_price(monkeypatch):
+    res = dca_engine.GuardResult(symbol="X", collateral_sent=False, collateral_usdc=30, buy_margin=70,
+                                 dca=dca_engine.DCAResult("BTCUSD", 280, 280, 2.0, 110.0),
+                                 error="담보 반영 확인 실패")
+    pos = parsed(pos_x(1.9))  # size 10, entry 100, mark 100
+    lv = liq_guard.compute_levels(pos, MM)
+    msg = liq_guard._defense_msg(pos, lv, res, None, None, 500.0, None)
+    print(msg)
+    lines = msg.split("\n")
+    assert lines[1] == "투입: 매수 마진 $70 (명목 $280)"
+    assert lines[4] == "평단: $100 → $101.67 (예상)"  # (100*10+110*2)/12
+    assert lines[5] == "가용 잔고: $430 (예상)"
+    only = dca_engine.GuardResult(symbol="X", collateral_sent=True, collateral_usdc=30)
+    assert liq_guard._defense_msg(pos, lv, only, None, None, 500.0, None).split("\n")[1] == "투입: 담보 $30"

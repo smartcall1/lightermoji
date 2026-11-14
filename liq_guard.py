@@ -195,12 +195,17 @@ def _defense_msg(pos: dict, lv: dict, res, pos2: dict | None, lv2: dict | None,
                  avail_before: float, avail_after: float | None) -> str:
     """[방어 투입] 6줄 알림(싸장님 11-15 승인). 재조회 값이 없으면 계산한 예상값에 (예상)을 붙인다."""
     coll = res.collateral_usdc if res.collateral_sent else 0.0
-    inj = bool(res.collateral_sent or res.buy_margin)
-    if inj:
-        line2 = (f"투입: 담보 ${res.collateral_usdc:,.0f} + 매수 마진 ${res.buy_margin:,.0f} "
-                 f"(명목 ${res.buy_margin * lv['lev']:,.0f})")
-    else:
+    parts = []
+    if coll > 0:
+        parts.append(f"담보 ${coll:,.0f}")
+    if res.buy_margin > 0:
+        parts.append(f"매수 마진 ${res.buy_margin:,.0f}")
+    if not parts:
         line2 = "투입 없음"
+    elif res.buy_margin > 0:
+        line2 = f"투입: {' + '.join(parts)} (명목 ${res.buy_margin * lv['lev']:,.0f})"
+    else:
+        line2 = f"투입: {parts[0]}"
     est = " (예상)"
     if pos2 is not None and lv2 is not None:
         liq_a, xb_a, xp_a, tag = pos2["liq"], lv2["x_block"], lv2["x_part"], ""
@@ -213,8 +218,12 @@ def _defense_msg(pos: dict, lv: dict, res, pos2: dict | None, lv2: dict | None,
         if entry > 0 and res.buy_margin <= 0:
             entry_a = fmt_price(entry) + est
         elif entry > 0 and mark > 0:
-            add_q = res.buy_margin * lv["lev"] / mark
-            entry_a = fmt_price((entry * lv["q"] + mark * add_q) / (lv["q"] + add_q)) + est
+            d = res.dca
+            if d is not None and (d.filled_amount or 0) > 0 and (d.avg_price or 0) > 0:
+                add_q, px = d.filled_amount, d.avg_price  # 실제 체결 수량·평균가
+            else:
+                add_q, px = res.buy_margin * lv["lev"] / mark, mark
+            entry_a = fmt_price((entry * lv["q"] + px * add_q) / (lv["q"] + add_q)) + est
         else:
             entry_a = "확인 못 함"
     if avail_after is not None:
