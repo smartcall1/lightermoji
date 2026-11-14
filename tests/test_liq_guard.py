@@ -646,3 +646,74 @@ async def test_busy_restores_previous_mark_in_file(monkeypatch):
     assert liq_guard.load_state() == {"1": 150.0}
     await w.tick()
     assert w.guard.await_count == 2
+
+
+# ── [방어 투입] 6줄 형식 (싸장님 11-15 승인) ──
+def _live_world(monkeypatch, **kw):
+    set_mode("live")
+    w = World(monkeypatch, account([pos_x(1.9)], avail="9876"))
+    w.guard.return_value = dca_engine.GuardResult(
+        symbol="X", collateral_sent=True, collateral_usdc=30, collateral_confirmed=True, buy_margin=70, **kw)
+    return w
+
+
+async def test_defense_msg_six_lines_refetch_ok(monkeypatch):
+    w = _live_world(monkeypatch)
+    await w.tick()
+    lines = w.sent[-1].split("\n")
+    print(w.sent[-1])
+    assert len(lines) == 6
+    assert lines[0].startswith("[방어 투입] ") and lines[0].endswith("롱 4x · 라이터")
+    assert lines[1] == "투입: 담보 $30 + 매수 마진 $70 (명목 $280)"
+    assert [l.split(":")[0] for l in lines[2:]] == ["청산가", "차단선까지", "평단", "가용 잔고"]
+    assert " → " in lines[2] and " → " in lines[3] and "(부분청산선 " in lines[3]
+    assert lines[4] == "평단: $100 → $100"
+    assert lines[5] == "가용 잔고: $9,876"
+    assert "(예상)" not in w.sent[-1]
+
+
+async def test_defense_msg_refetch_fail_marks_estimate(monkeypatch):
+    w = _live_world(monkeypatch)
+    calls = {"n": 0}
+    first = w.acct
+
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return first
+        raise RuntimeError("net")
+    monkeypatch.setattr(liq_guard, "fetch_account", flaky)
+    await w.tick()
+    lines = w.sent[-1].split("\n")
+    print(w.sent[-1])
+    assert len(lines) == 6
+    assert lines[2].endswith("(예상)") and lines[3].endswith("(예상)")
+    assert lines[4].endswith("(예상)") and lines[4].startswith("평단: $100 → $")
+    assert lines[5] == "가용 잔고: $9,776 (예상)"  # 9,876 - 30 - 70
+
+
+async def test_defense_msg_no_entry_basis(monkeypatch):
+    res = dca_engine.GuardResult(symbol="X", collateral_sent=True, collateral_usdc=30, buy_margin=70)
+    pos = parsed(pos_x(1.9, entry=0.0))
+    lv = liq_guard.compute_levels(pos, MM)
+    msg = liq_guard._defense_msg(pos, lv, res, None, None, 500.0, None)
+    assert msg.split("\n")[4] == "평단: $0 → 확인 못 함"
+
+
+async def test_defense_msg_failure_has_abort_line_and_unresolved(monkeypatch):
+    w = _live_world(monkeypatch, error="담보 반영 확인 실패")
+    monkeypatch.setattr(config, "LIQ_GUARD_BUDGET_USD", 1.0)  # 예산이 모자라 차단 미해소
+    w.acct = account([pos_x(-0.5)], avail="9876")
+    await w.tick()
+    txt = w.sent[-1]
+    print(txt)
+    assert txt.split("\n")[0].endswith("· 라이터")
+    assert "\n중단: 담보 반영 확인 실패" in txt
+    assert txt.endswith("차단 미해소 - 수동 확인")
+
+
+async def test_defense_msg_no_injection(monkeypatch):
+    w = _live_world(monkeypatch)
+    w.guard.return_value = dca_engine.GuardResult(symbol="X", error="x")
+    await w.tick()
+    assert w.sent[-1].split("\n")[1] == "투입 없음"
