@@ -662,13 +662,14 @@ async def test_defense_msg_six_lines_refetch_ok(monkeypatch):
     await w.tick()
     lines = w.sent[-1].split("\n")
     print(w.sent[-1])
-    assert len(lines) == 6
+    assert len(lines) == 7
     assert lines[0].startswith("[방어 투입] ") and lines[0].endswith("롱 4x · 라이터")
     assert lines[1] == "투입: 담보 $30 + 매수 마진 $70 (명목 $280)"
-    assert [l.split(":")[0] for l in lines[2:]] == ["청산가", "차단선까지", "평단", "가용 잔고"]
-    assert " → " in lines[2] and " → " in lines[3] and "(부분청산선 " in lines[3]
-    assert lines[4] == "평단: $100 → $100"
-    assert lines[5] == "가용 잔고: $9,876"
+    assert [l.split(":")[0] for l in lines[2:]] == ["청산가", "청산까지", "차단선까지", "평단", "가용 잔고"]
+    assert " → " in lines[2] and " → " in lines[3] and " → " in lines[4]
+    assert "(현재가 $" in lines[3] and "부분청산선" not in w.sent[-1]
+    assert lines[5] == "평단: $100 → $100"
+    assert lines[6] == "가용 잔고: $9,876"
     assert "(예상)" not in w.sent[-1]
 
 
@@ -686,10 +687,10 @@ async def test_defense_msg_refetch_fail_marks_estimate(monkeypatch):
     await w.tick()
     lines = w.sent[-1].split("\n")
     print(w.sent[-1])
-    assert len(lines) == 6
-    assert lines[2].endswith("(예상)") and lines[3].endswith("(예상)")
-    assert lines[4].endswith("(예상)") and lines[4].startswith("평단: $100 → $")
-    assert lines[5] == "가용 잔고: $9,776 (예상)"  # 9,876 - 30 - 70
+    assert len(lines) == 7
+    assert all(lines[i].endswith("(예상)") for i in (2, 3, 4))
+    assert lines[5].endswith("(예상)") and lines[5].startswith("평단: $100 → $")
+    assert lines[6] == "가용 잔고: $9,776 (예상)"  # 9,876 - 30 - 70
 
 
 async def test_defense_msg_no_entry_basis(monkeypatch):
@@ -697,7 +698,7 @@ async def test_defense_msg_no_entry_basis(monkeypatch):
     pos = parsed(pos_x(1.9, entry=0.0))
     lv = liq_guard.compute_levels(pos, MM)
     msg = liq_guard._defense_msg(pos, lv, res, None, None, 500.0, None)
-    assert msg.split("\n")[4] == "평단: $0 → 확인 못 함"
+    assert msg.split("\n")[5] == "평단: $0 → 확인 못 함"
 
 
 async def test_defense_msg_failure_has_abort_line_and_unresolved(monkeypatch):
@@ -729,8 +730,8 @@ async def test_defense_msg_collateral_failed_buy_only_uses_fill_price(monkeypatc
     print(msg)
     lines = msg.split("\n")
     assert lines[1] == "투입: 매수 마진 $70 (명목 $280)"
-    assert lines[4] == "평단: $100 → $101.67 (예상)"  # (100*10+110*2)/12
-    assert lines[5] == "가용 잔고: $430 (예상)"
+    assert lines[5] == "평단: $100 → $101.67 (예상)"  # (100*10+110*2)/12
+    assert lines[6] == "가용 잔고: $430 (예상)"
     only = dca_engine.GuardResult(symbol="X", collateral_sent=True, collateral_usdc=30)
     assert liq_guard._defense_msg(pos, lv, only, None, None, 500.0, None).split("\n")[1] == "투입: 담보 $30"
 
@@ -738,7 +739,7 @@ async def test_defense_msg_collateral_failed_buy_only_uses_fill_price(monkeypatc
 # ---- /guardstatus 표시 형식(싸장님 11-15 승인) ----
 def _st(**kw):
     d = {"x_block": 2.94, "x_part": 7.2, "liq": 64.20, "p_part": 64.20,
-         "last_inject_mark": None, "ts": 0, "lev": 5.0, "side": "롱"}
+         "mark": 70.01, "last_inject_mark": None, "ts": 0, "lev": 5.0, "side": "롱"}
     d.update(kw)
     return d
 
@@ -765,13 +766,13 @@ def test_format_status_full_layout(monkeypatch):
         "투입 조건: 차단선까지 2.0% 아래면 $100 (담보 30%), 4.0%까지 회복이 목표",
         "",
         "SOL 롱 5x",
-        "차단선까지: 2.9% (부분청산선 7.2%)",
-        "청산가: $64.20 (계산 일치)",
+        "청산까지: 7.2% (현재가 $70.01 / 청산가 $64.20)",
+        "차단선까지: 2.9%",
         "마지막 투입: 없음",
         "",
         "BNB 롱 5x",
-        "차단선까지: 4.8% (부분청산선 6.8%)",
-        "청산가: $536.84 (계산 일치)",
+        "청산까지: 6.8% (현재가 $70.01 / 청산가 $536.84)",
+        "차단선까지: 4.8%",
         "마지막 투입: 없음",
     ])
 
@@ -782,8 +783,10 @@ def test_format_status_variants(monkeypatch):
     out = liq_guard.format_status().split("\n")
     assert out[1] == "15초마다 확인 · 마지막 확인 아직 없음 · 정기 DCA 켜짐"
     assert out[4] == "SOL 롱"                      # 배수 없으면 배수만 뺀다
-    assert out[6] == "청산가: $64.20 (계산 $70 — 다름!)"
+    assert out[5] == "청산까지: 7.2% (현재가 $70.01 / 청산가 $64.20) · 계산 $70 — 다름!"
+    assert out[6] == "차단선까지: 2.9%"
     assert out[7] == "마지막 투입: $61.50 때"
+    assert "부분청산선" not in "\n".join(out)
     assert "market" not in "\n".join(out)
 
 
