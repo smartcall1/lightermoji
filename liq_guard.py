@@ -226,6 +226,7 @@ def _defense_msg(pos: dict, lv: dict, res, pos2: dict | None, lv2: dict | None,
             entry_a = fmt_price((entry * lv["q"] + px * add_q) / (lv["q"] + add_q)) + est
         else:
             entry_a = "확인 못 함"
+    mark_a = lv2["mark"] if (pos2 is not None and lv2 is not None) else lv["mark"]
     if avail_after is not None:
         avail_txt = f"${avail_after:,.0f}"
     else:
@@ -234,7 +235,8 @@ def _defense_msg(pos: dict, lv: dict, res, pos2: dict | None, lv2: dict | None,
         f"[방어 투입] {pos['name']} 롱 {lv['lev']:.0f}x · 라이터",
         line2,
         f"청산가: {fmt_price(pos['liq'])} → {fmt_price(liq_a)}{tag}",
-        f"차단선까지: {lv['x_block']:.1f}% → {xb_a:.1f}% (부분청산선 {lv['x_part']:.1f}% → {xp_a:.1f}%){tag}",
+        f"청산까지: {lv['x_part']:.1f}% → {xp_a:.1f}% (현재가 {fmt_price(mark_a)}){tag}",
+        f"차단선까지: {lv['x_block']:.1f}% → {xb_a:.1f}%{tag}",
         f"평단: {fmt_price(pos['entry'])} → {entry_a}",
         f"가용 잔고: {avail_txt}",
     ])
@@ -327,7 +329,7 @@ async def _handle_position(send, mode: str, pos: dict, state: dict, available: f
         return available
 
     _status[symbol] = {"x_block": lv["x_block"], "x_part": lv["x_part"], "liq": pos["liq"],
-                       "p_part": lv["p_part"], "last_inject_mark": state.get(mid), "ts": _now(),
+                       "p_part": lv["p_part"], "mark": lv["mark"], "last_inject_mark": state.get(mid), "ts": _now(),
                        "lev": lv["lev"], "side": "롱"}
     triggered = lv["x_block"] <= config.LIQ_GUARD_TRIGGER_PCT
     share = runtime_flags.collateral_min_share()
@@ -448,15 +450,14 @@ def format_status() -> str:
         if s.get("lev"):
             head += f" {s['lev']:.0f}x"
         api_liq = float(s.get("liq") or 0)
-        if api_liq > 0 and abs(s["p_part"] - api_liq) / api_liq <= LIQ_MISMATCH_TOL:
-            liq_line = f"청산가: {fmt_price(s['liq'])} (계산 일치)"
-        else:
-            liq_line = f"청산가: {fmt_price(s['liq'])} (계산 {fmt_price(s['p_part'])} — 다름!)"
+        diff = ""
+        if not (api_liq > 0 and abs(s["p_part"] - api_liq) / api_liq <= LIQ_MISMATCH_TOL):
+            diff = f" · 계산 {fmt_price(s['p_part'])} — 다름!"
         mark = s.get("last_inject_mark")
         blocks.append("\n".join([
             head,
-            f"차단선까지: {s['x_block']:.1f}% (부분청산선 {s['x_part']:.1f}%)",
-            liq_line,
+            f"청산까지: {s['x_part']:.1f}% (현재가 {fmt_price(s['mark'])} / 청산가 {fmt_price(s['liq'])}){diff}",
+            f"차단선까지: {s['x_block']:.1f}%",
             f"마지막 투입: {fmt_price(mark)} 때" if mark else "마지막 투입: 없음",
         ]))
     return "\n".join(lines) + "\n" + "\n\n".join(blocks)
